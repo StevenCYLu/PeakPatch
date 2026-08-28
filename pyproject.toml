@@ -8,6 +8,7 @@ version = "1.0.0"
 description = "PeakPatch: recovering negation from frozen CLIP intermediate features"
 readme = "README.md"
 license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0.0",

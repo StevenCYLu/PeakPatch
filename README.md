@@ -161,4 +161,4 @@ uv run scripts/train_joint.py --exp-name peakpatch \
 
 ## License
 
-MIT &mdash; see [LICENSE](LICENSE).
+Apache 2.0 &mdash; see [LICENSE](LICENSE).
