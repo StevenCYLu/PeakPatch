@@ -9,13 +9,6 @@ Chen-Yi Lu, Yueh-Shao Chen, Somali Chaterji &mdash; Purdue University
 
 ---
 
-> **Scope.** This repository covers the **negation MCQ** experiments: the released checkpoints, the
-> evaluation, and the training pipeline behind them. Retrieval, text-to-image and LCD-analysis
-> experiments are in the paper and on the project page.
-
-> **Naming.** The paper calls the modules ECN and SCN; the code calls them `EmbeddingCorrector` and
-> `ScoreCorrector`. They are the same modules.
-
 ## Results
 
 NegBench MCQ accuracy (%), frozen CLIP ViT-B/32. Aff / Neg / Hyb are the affirmation, negation and
@@ -28,16 +21,11 @@ hybrid question templates; Avg is over all questions.
 | CLIP, VOC2007 | 82.6 | 3.4 | 59.0 | **38.7** |
 | **PeakPatch, VOC2007** | **99.7** | **57.9** | **62.2** | **65.5** |
 
-Evaluation is deterministic: on one A100 the commands below reproduce 0.7433209 and 0.6547406
-exactly.
-
-> The CLIP rows above are this repository's own measurements. The baseline columns in the paper are
-> quoted from the NegBench benchmark, so they differ from these by a few tenths of a point.
-
 ## Installation
 
 ```bash
 uv sync
+source .venv/bin/activate
 ```
 
 Requires Python &ge; 3.10 and a CUDA-capable GPU (the evaluation needs ~2 GB of VRAM). The CLIP
@@ -81,10 +69,12 @@ The evaluation needs the NegBench MCQ CSVs plus the COCO and VOC images they ref
 The three paths can also be given as the environment variables `NEGBENCH_CSV_DIR`,
 `COCO_IMAGE_ROOT` and `VOC_IMAGE_ROOT`.
 
-## Reproducing the paper's MCQ numbers
+## Evaluation
+
+Score the released checkpoints on the NegBench MCQ sets:
 
 ```bash
-uv run python scripts/eval_mcq.py --tasks coco voc \
+python scripts/eval_mcq.py --tasks coco voc \
     --negbench-csv-dir /path/to/negbench_csvs \
     --coco-image-root /path/to/coco_root \
     --voc-image-root  /path/to/voc_root \
@@ -98,10 +88,11 @@ coco_mcq-negative_accuracy: 0.6321   voc_mcq-negative_accuracy: 0.5790
 coco_mcq-hybrid_accuracy: 0.6069     voc_mcq-hybrid_accuracy: 0.6221
 ```
 
-The frozen-backbone baseline row:
+`--tasks` selects the sets to run, and `--output` writes the per-task accuracies as JSON. Use
+`--model clip` to score the frozen backbone instead of PeakPatch:
 
 ```bash
-uv run python scripts/eval_mcq.py --model clip --tasks coco voc \
+python scripts/eval_mcq.py --model clip --tasks coco voc \
     --negbench-csv-dir ... --coco-image-root ... --voc-image-root ...
 ```
 
@@ -114,7 +105,7 @@ Any fine-tuned ViT-B/32 checkpoint (NegCLIP, CoN-CLIP, ...) can be scored the sa
 ECN, and 4-way MCQ questions for the SCN. Both CSVs record absolute image paths:
 
 ```bash
-uv run python scripts/prepare_coco_train.py \
+python scripts/prepare_coco_train.py \
     --coco-dir /path/to/coco --output-dir data/coco_train_negation
 # -> coco_negcap_train2014.csv, coco_negmcq_train2014.csv
 ```
@@ -126,14 +117,14 @@ ViT-L/14:
 ```bash
 # negcap features for the ECN, split 90/10
 for split in train val; do
-  uv run python scripts/extract_negcap_features.py \
+  python scripts/extract_negcap_features.py \
       --input-csv data/coco_train_negation/coco_negcap_train2014.csv \
       --output-dir data/negcap/$split \
       --model ViT-B-32 --split $split --split-ratio 0.9 --seed 42
 done
 
 # per-layer [EOS] features for the SCN
-uv run python scripts/extract_features.py \
+python scripts/extract_features.py \
     --input-csv data/coco_train_negation/coco_negmcq_train2014.csv \
     --image-root / --output-dir data/mcq/train \
     --model ViT-B-32 --layers 3 7 8 12
@@ -143,7 +134,7 @@ uv run python scripts/extract_features.py \
 about an hour on a single A100:
 
 ```bash
-uv run python scripts/train_joint.py --exp-name peakpatch \
+python scripts/train_joint.py --exp-name peakpatch \
     --negcap-train-dir data/negcap/train --negcap-val-dir data/negcap/val \
     --mcq-train-dir data/mcq/train --mcq-val-dir data/mcq/val \
     --target-layer 8 --anchor-layer 6 --sc-layers 7 12 \
