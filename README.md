@@ -25,7 +25,6 @@ hybrid question templates; Avg is over all questions.
 
 ```bash
 uv sync
-source .venv/bin/activate
 ```
 
 Requires Python &ge; 3.10 and a CUDA-capable GPU (the evaluation needs ~2 GB of VRAM). The CLIP
@@ -74,7 +73,7 @@ The three paths can also be given as the environment variables `NEGBENCH_CSV_DIR
 Score the released checkpoints on the NegBench MCQ sets:
 
 ```bash
-python scripts/eval_mcq.py --tasks coco voc \
+uv run scripts/eval_mcq.py --tasks coco voc \
     --negbench-csv-dir /path/to/negbench_csvs \
     --coco-image-root /path/to/coco_root \
     --voc-image-root  /path/to/voc_root \
@@ -92,7 +91,7 @@ coco_mcq-hybrid_accuracy: 0.6069     voc_mcq-hybrid_accuracy: 0.6221
 `--model clip` to score the frozen backbone instead of PeakPatch:
 
 ```bash
-python scripts/eval_mcq.py --model clip --tasks coco voc \
+uv run scripts/eval_mcq.py --model clip --tasks coco voc \
     --negbench-csv-dir ... --coco-image-root ... --voc-image-root ...
 ```
 
@@ -105,7 +104,7 @@ Any fine-tuned ViT-B/32 checkpoint (NegCLIP, CoN-CLIP, ...) can be scored the sa
 ECN, and 4-way MCQ questions for the SCN. Both CSVs record absolute image paths:
 
 ```bash
-python scripts/prepare_coco_train.py \
+uv run scripts/prepare_coco_train.py \
     --coco-dir /path/to/coco --output-dir data/coco_train_negation
 # -> coco_negcap_train2014.csv, coco_negmcq_train2014.csv
 ```
@@ -117,14 +116,14 @@ ViT-L/14:
 ```bash
 # negcap features for the ECN, split 90/10
 for split in train val; do
-  python scripts/extract_negcap_features.py \
+  uv run scripts/extract_negcap_features.py \
       --input-csv data/coco_train_negation/coco_negcap_train2014.csv \
       --output-dir data/negcap/$split \
       --model ViT-B-32 --split $split --split-ratio 0.9 --seed 42
 done
 
 # per-layer [EOS] features for the SCN
-python scripts/extract_features.py \
+uv run scripts/extract_features.py \
     --input-csv data/coco_train_negation/coco_negmcq_train2014.csv \
     --image-root / --output-dir data/mcq/train \
     --model ViT-B-32 --layers 3 7 8 12
@@ -134,7 +133,7 @@ python scripts/extract_features.py \
 about an hour on a single A100:
 
 ```bash
-python scripts/train_joint.py --exp-name peakpatch \
+uv run scripts/train_joint.py --exp-name peakpatch \
     --negcap-train-dir data/negcap/train --negcap-val-dir data/negcap/val \
     --mcq-train-dir data/mcq/train --mcq-val-dir data/mcq/val \
     --target-layer 8 --anchor-layer 6 --sc-layers 7 12 \
