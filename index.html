@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PeakPatch &mdash; What CLIP Knows but Cannot Say</title>
+<meta name="description" content="PeakPatch: recovering negation from frozen intermediate CLIP features. A lightweight post-hoc correction system that keeps CLIP frozen and adds 5.2M parameters. ECCV 2026 Oral.">
+<meta property="og:title" content="What CLIP Knows but Cannot Say: Recovering Negation from Frozen Intermediate Features">
+<meta property="og:description" content="PeakPatch intercepts CLIP's text encoder at its compositional peak and repairs the collapsed final embedding &mdash; 74.3% on NegBench COCO MCQ with a fully frozen backbone.">
+<meta property="og:type" content="website">
+<!-- link previews need an absolute URL, and scrapers are steadier on JPEG than
+     on the WebP the page itself uses -->
+<meta property="og:url" content="https://stevencylu.github.io/PeakPatch/">
+<meta property="og:image" content="https://stevencylu.github.io/PeakPatch/static/images/teaser-card.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128142;</text></svg>">
+<style>
+  :root {
+    --bg:        #ffffff;
+    --text:      #16181d;
+    --muted:     #5b6169;
+    --faint:     #8b9199;
+    --accent:    #2a4d8f;
+    --accent-sm: #eaf0fa;
+    --rule:      #e3e6ea;
+    --rule-soft: #eef0f3;
+    --code-bg:   #f5f6f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0f1115;
+      --text:      #e6e8ec;
+      --muted:     #a2a9b4;
+      --faint:     #79808b;
+      --accent:    #7ba7e8;
+      --accent-sm: #1a2436;
+      --rule:      #272c34;
+      --rule-soft: #1d222a;
+      --code-bg:   #161a20;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0f1115;
+    --text:      #e6e8ec;
+    --muted:     #a2a9b4;
+    --faint:     #79808b;
+    --accent:    #7ba7e8;
+    --accent-sm: #1a2436;
+    --rule:      #272c34;
+    --rule-soft: #1d222a;
+    --code-bg:   #161a20;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+  .narrow { max-width: 760px; margin-left: auto; margin-right: auto; }
+
+  /* ---------- header ---------- */
+  header {
+    text-align: center;
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .venue {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-sm);
+    padding: 5px 12px;
+    border-radius: 999px;
+    margin-bottom: 22px;
+  }
+  h1 {
+    font-size: clamp(1.7rem, 4.4vw, 2.5rem);
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+    margin: 0 0 0.35em;
+  }
+  h1 .sub {
+    display: block;
+    font-size: 0.62em;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: -0.01em;
+    margin-top: 0.4em;
+  }
+  .authors {
+    font-size: 1.05rem;
+    margin: 26px 0 6px;
+    line-height: 2;
+  }
+  .authors .sep { color: var(--faint); margin: 0 0.5em; }
+  /* homepage links, kept quiet so the byline does not read as three buttons */
+  .authors a {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+  .authors a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+  .affil { color: var(--muted); font-size: 0.97rem; margin: 0; }
+
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 28px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 18px;
+    border-radius: 999px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 0.92rem;
+    font-weight: 600;
+    border: 1px solid var(--text);
+    transition: opacity 0.15s ease;
+  }
+  .btn:hover { opacity: 0.82; text-decoration: none; }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--rule); }
+  .btn.ghost:hover { border-color: var(--faint); opacity: 1; }
+  .btn svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
+
+  /* ---------- sections ---------- */
+  section { padding: 56px 0; border-bottom: 1px solid var(--rule-soft); }
+  section:last-of-type { border-bottom: none; }
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 1em;
+    text-align: center;
+  }
+  h3 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin: 2em 0 0.5em;
+  }
+  p { margin: 0 0 1.1em; }
+  .lead { text-align: justify; }
+  em.term { font-style: italic; }
+  .name { font-weight: 650; letter-spacing: -0.005em; }
+
+  /* ---------- figures ---------- */
+  figure { margin: 0 0 8px; }
+  figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 6px;
+  }
+  figure img.plot { max-width: 660px; margin: 0 auto; }
+  figure img.framed {
+    background: #fff;
+    border: 1px solid var(--rule);
+    padding: 10px;
+  }
+  figcaption {
+    font-size: 0.9rem;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-top: 14px;
+    text-align: left;
+  }
+  figcaption b { color: var(--text); font-weight: 650; }
+
+  /* ---------- highlight numbers ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 34px 0 0;
+  }
+  .stat { background: var(--bg); padding: 20px 16px; text-align: center; }
+  .stat .num {
+    font-size: 1.55rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--accent);
+    display: block;
+    line-height: 1.2;
+  }
+  .stat .lbl {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-top: 5px;
+    display: block;
+    line-height: 1.4;
+  }
+
+  /* ---------- tables ---------- */
+  .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 10px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 560px;
+    font-size: 0.88rem;
+    font-variant-numeric: tabular-nums;
+  }
+  caption {
+    caption-side: bottom;
+    font-size: 0.87rem;
+    color: var(--muted);
+    text-align: left;
+    padding-top: 12px;
+    line-height: 1.6;
+  }
+  caption b { color: var(--text); font-weight: 650; }
+  th, td { padding: 7px 9px; text-align: center; white-space: nowrap; }
+  th { font-weight: 650; font-size: 0.82rem; color: var(--muted); }
+  th.group { border-bottom: 1px solid var(--rule); font-weight: 650; color: var(--text); }
+  /* Only the row-label column is left-aligned. In two-row headers the second
+     row's first cell is a data column ("Aff", "R@1", ...) and must stay centred
+     over its numbers, so it must not match here. */
+  tbody td:first-child,
+  thead tr:first-child th:first-child {
+    text-align: left;
+    white-space: normal;
+    min-width: 150px;
+  }
+  thead tr:last-child th { border-bottom: 1.5px solid var(--rule); }
+  tbody tr.rule-top td { border-top: 1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom: 1.5px solid var(--rule); }
+  td.best { font-weight: 700; }
+  tr.ours { background: var(--accent-sm); }
+  tr.ours td:first-child { font-weight: 650; }
+  tr.section-head td {
+    text-align: left;
+    font-style: italic;
+    color: var(--muted);
+    font-size: 0.82rem;
+    padding-top: 12px;
+  }
+  .venue-tag { color: var(--faint); font-size: 0.78em; font-style: normal; }
+  .note { font-size: 0.82rem; color: var(--faint); margin-top: 6px; line-height: 1.6; }
+
+
+  /* ---------- code / bibtex ---------- */
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule-soft);
+    border-radius: 8px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    margin: 0;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  p code, li code {
+    background: var(--code-bg);
+    border: 1px solid var(--rule-soft);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.88em;
+  }
+
+  footer {
+    padding: 40px 0 64px;
+    text-align: center;
+    font-size: 0.87rem;
+    color: var(--faint);
+    border-top: 1px solid var(--rule);
+  }
+
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    header { padding: 48px 0 32px; }
+    section { padding: 44px 0; }
+    .lead { text-align: left; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <span class="venue">ECCV 2026 Oral</span>
+    <h1>
+      What CLIP Knows but Cannot Say
+      <span class="sub">Recovering Negation from Frozen Intermediate Features</span>
+    </h1>
+    <p class="authors">
+      <a href="https://stevencylu.github.io/">Chen-Yi Lu</a><span class="sep">&middot;</span><a href="https://wesleych3n.github.io/">Yueh-Shao Chen</a><span class="sep">&middot;</span><a href="https://schaterji.io/">Somali Chaterji</a>
+    </p>
+    <p class="affil">Purdue University</p>
+
+    <div class="links">
+      <a class="btn" href="https://arxiv.org/pdf/2607.23271">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 0H3.5A1.5 1.5 0 0 0 2 1.5v13A1.5 1.5 0 0 0 3.5 16h9a1.5 1.5 0 0 0 1.5-1.5V4.5L9.5 0Zm0 1.75L12.25 4.5H10a.5.5 0 0 1-.5-.5V1.75ZM4.5 8h7v1.2h-7V8Zm0 2.6h7v1.2h-7v-1.2ZM4.5 5.4h3v1.2h-3V5.4Z"/></svg>
+        Paper
+      </a>
+      <a class="btn ghost" href="https://arxiv.org/abs/2607.23271">arXiv:2607.23271</a>
+      <a class="btn" href="https://github.com/StevenCYLu/PeakPatch">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        Code
+      </a>
+      <a class="btn ghost" href="#bibtex">BibTeX</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ================= TEASER ================= -->
+  <section>
+    <figure>
+      <img class="framed" src="static/images/teaser.webp" alt="CLIP retrieves images containing the negated object and picks the wrong MCQ caption; PeakPatch fixes both.">
+      <figcaption class="narrow">
+        <b>CLIP's negation blindness on two NegBench protocols.</b>
+        <em>(Left)</em> Retrieval: CLIP retrieves images containing the negated object (cup), treating
+        &ldquo;No cup is present&rdquo; as similar to &ldquo;cup present.&rdquo;
+        <span class="name">PeakPatch</span> correctly retrieves cup-free images.
+        <em>(Right)</em> MCQ: given a cat image with no book, CLIP selects a caption mentioning both nouns
+        while ignoring negation; <span class="name">PeakPatch</span> selects the correct answer.
+      </figcaption>
+    </figure>
+
+    <div class="stats">
+      <div class="stat">
+        <span class="num">74.3%</span>
+        <span class="lbl">COCO MCQ<br>(+35.1 over CLIP)</span>
+      </div>
+      <div class="stat">
+        <span class="num">65.5%</span>
+        <span class="lbl">VOC MCQ<br>(+27.6 over CLIP)</span>
+      </div>
+      <div class="stat">
+        <span class="num">5.2M</span>
+        <span class="lbl">trained params<br>(3.5% of backbone)</span>
+      </div>
+      <div class="stat">
+        <span class="num">0</span>
+        <span class="lbl">CLIP weights<br>modified</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ABSTRACT ================= -->
+  <section>
+    <h2>Abstract</h2>
+    <div class="narrow lead">
+      <p>
+        Contrastive vision-language models such as CLIP map semantically opposite phrases
+        (e.g., &ldquo;a dog&rdquo; vs. &ldquo;not a dog&rdquo;) to nearly identical embeddings,
+        rendering them insensitive to negation. We attribute this failure to a phenomenon we call
+        <em class="term">Representational Collapse</em>: by tracking compositional divergence and
+        visual alignment across the CLIP text encoder, we show that middle layers build compositional
+        syntax, but the final layers collapse this structure as visual alignment rises, producing a
+        syntax-blind final representation.
+      </p>
+      <p>
+        To recover the lost negation signal without altering pretrained weights, we propose
+        <span class="name">PeakPatch</span>, a lightweight post-hoc correction system that intercepts
+        the encoder at its <em class="term">compositional peak</em> while keeping CLIP fully frozen.
+        An Embedding Correction Network (ECN) uses cross-attention to extract a negation-specific
+        signal from the peak layer, anchored to a stable baseline, and predicts a deviation vector
+        that re-injects the lost syntax into the final-layer embedding space. A complementary Score
+        Correction Network (SCN) predicts bounded scalar score offsets for discriminative tasks.
+        Both modules are trained jointly end-to-end while all CLIP parameters remain frozen, adding
+        only 5.2M parameters (3.5% of the backbone) and preserving the standard cosine similarity
+        interface.
+      </p>
+      <p>
+        On NegBench, <span class="name">PeakPatch</span> achieves 74.3% on COCO MCQ
+        (+35.1 over CLIP, +17.8 over the best encoder fine-tuning method) and 65.5% on VOC MCQ,
+        while outperforming all fine-tuning baselines on fully out-of-distribution negation retrieval
+        despite training only 3.5% of the parameters. The corrected embeddings also transfer to
+        text-to-image generation (+18.4 negation score) and generalize across ViT-B/32, ViT-L/14,
+        and SigLIP backbones.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= FINDING ================= -->
+  <section>
+    <h2>Representational Collapse</h2>
+    <div class="narrow lead">
+      <p>
+        We probe the frozen CLIP text encoder layer by layer with two complementary metrics.
+        <b>Layer-wise Compositional Divergence</b>
+        <code>D(&#8467;) = 1 &minus; cos(f<sup>&#8467;</sup>(T&#8314;), f<sup>&#8467;</sup>(T&#8315;))</code>
+        measures how well layer&nbsp;&#8467; separates a caption from its negation.
+        <b>Visual alignment</b> <code>A(&#8467;) = cos(f<sup>&#8467;</sup>(T), f<sub>I</sub>)</code>
+        measures how strongly contrastive pressure has already reshaped that layer toward the image.
+      </p>
+      <p>
+        The two curves tell a clear story: negation separability is <em class="term">built</em> in the
+        middle layers and then <em class="term">destroyed</em> in the last ones, exactly as visual
+        alignment takes over. CLIP does encode negation &mdash; it just discards it before the output.
+      </p>
+    </div>
+
+    <figure style="margin-top: 32px;">
+      <img class="plot framed" src="static/images/lcd_curve.png" alt="LCD rises to a peak at layer 8, then drops sharply as visual alignment rises.">
+      <figcaption class="narrow">
+        <b>Representational Collapse in CLIP's text encoder.</b>
+        Compositional divergence (blue, left axis) peaks at layer&nbsp;<i>l<sub>p</sub></i> but drops
+        sharply as visual alignment (red, right axis) rises, collapsing into a syntax-blind
+        representation. <span class="name">PeakPatch</span> extracts negation features at
+        <i>l<sub>p</sub></i> (compositional peak) and anchors them to <i>l<sub>a</sub></i>.
+      </figcaption>
+    </figure>
+
+    <figure style="margin-top: 40px;">
+      <img class="plot framed" src="static/images/lcd_control.png" alt="Only the negation condition shows the rise-and-fall trajectory; paraphrase stays flat and random rises monotonically.">
+      <figcaption class="narrow">
+        <b>The collapse is negation-specific.</b> Across 1K pairs, paraphrase rewordings stay near
+        zero and unrelated captions rise monotonically. Only negation shows the characteristic
+        rise-and-fall, isolating Representational Collapse as a negation-specific phenomenon rather
+        than a generic property of the encoder.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ================= METHOD ================= -->
+  <section>
+    <h2>Method</h2>
+    <div class="narrow lead" style="text-align: center;">
+      <p>
+        Tap the encoder where negation still exists; patch what the last layers threw away.
+        Every CLIP weight stays frozen.
+      </p>
+    </div>
+
+    <figure style="margin-top: 30px;">
+      <img class="framed" src="static/images/method.png" alt="PeakPatch architecture: ECN cross-attends over the peak layer to predict a deviation vector; SCN predicts a bounded score offset.">
+      <figcaption class="narrow">
+        <b>The PeakPatch architecture.</b>
+        With all CLIP parameters frozen, we extract hidden states at three layers identified by the
+        LCD analysis: anchor <i>l<sub>a</sub></i>, compositional peak <i>l<sub>p</sub></i>, and
+        final layer <i>L</i>. The ECN attends over the full token sequence at <i>l<sub>p</sub></i>
+        with a learned query and predicts a deviation vector <b>&delta;</b> added to the collapsed
+        layer-<i>L</i> embedding. The SCN contrasts the corrected embedding with the peak
+        representation and the image embedding to predict a bounded scalar correction
+        &Delta;<i>s</i>.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ================= RESULTS: MCQ ================= -->
+  <section>
+    <h2>Results</h2>
+
+    <h3>Negation MCQ on NegBench</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th rowspan="2">Method</th>
+            <th class="group" colspan="4">COCO</th>
+            <th class="group" colspan="4">VOC</th>
+          </tr>
+          <tr>
+            <th>Aff</th><th>Neg</th><th>Hyb</th><th>Avg</th>
+            <th>Aff</th><th>Neg</th><th>Hyb</th><th>Avg</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLIP</td>
+            <td>70.0</td><td>6.6</td><td>38.4</td><td>39.2</td>
+            <td>80.9</td><td>3.0</td><td>58.0</td><td>37.9</td>
+          </tr>
+          <tr class="section-head"><td colspan="9">Encoder fine-tuning</td></tr>
+          <tr>
+            <td>NegCLIP <span class="venue-tag">ICLR'23</span></td>
+            <td>49.2</td><td>13.9</td><td>16.3</td><td>26.8</td>
+            <td>70.5</td><td>4.6</td><td>42.3</td><td>30.2</td>
+          </tr>
+          <tr>
+            <td>CoN-CLIP <span class="venue-tag">WACV'25</span></td>
+            <td>15.6</td><td>32.9</td><td>25.3</td><td>24.4</td>
+            <td>24.8</td><td>23.2</td><td>56.7</td><td>38.2</td>
+          </tr>
+          <tr>
+            <td>CLIP + NF <span class="venue-tag">CVPR'25</span></td>
+            <td>73.1</td><td>33.2</td><td>54.7</td><td>54.2</td>
+            <td>85.0</td><td>31.7</td><td>79.5</td><td>60.1</td>
+          </tr>
+          <tr>
+            <td>NegCLIP + NF <span class="venue-tag">CVPR'25</span></td>
+            <td>81.0</td><td>25.9</td><td>60.1</td><td>56.5</td>
+            <td>81.0</td><td>21.1</td><td class="best">83.7</td><td>58.2</td>
+          </tr>
+          <tr class="section-head"><td colspan="9">Post-hoc correction (frozen backbone)</td></tr>
+          <tr>
+            <td>DCSM<sup>&dagger;</sup> <span class="venue-tag">ICCV'25</span></td>
+            <td>71.2</td><td>6.6</td><td>68.0</td><td>48.6</td>
+            <td>68.5</td><td>5.4</td><td>73.1</td><td>49.0</td>
+          </tr>
+          <tr class="ours">
+            <td>PeakPatch</td>
+            <td class="best">98.1</td><td class="best">63.2</td><td class="best">60.7</td><td class="best">74.3</td>
+            <td class="best">99.7</td><td class="best">57.9</td><td>62.2</td><td class="best">65.5</td>
+          </tr>
+        </tbody>
+        <caption>
+          <b>Negation MCQ accuracy (%) on NegBench.</b> Aff, Neg, and Hyb denote affirmation,
+          negation, and hybrid template types; Avg is computed over all samples across template
+          types. All methods use CLIP ViT-B/32 unless noted.
+          <span class="note"><sup>&dagger;</sup> Uses ViT-B/16 backbone. NF = NegFull fine-tuning data.</span>
+        </caption>
+      </table>
+    </div>
+
+    <h3>Negation retrieval (text &rarr; image)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th rowspan="2">Method</th>
+            <th rowspan="2">Type</th>
+            <th rowspan="2">#P</th>
+            <th class="group" colspan="2">COCO</th>
+            <th class="group" colspan="2">MSR-VTT</th>
+          </tr>
+          <tr><th>R@1</th><th>R@5</th><th>R@1</th><th>R@5</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLIP</td><td>&mdash;</td><td>&mdash;</td>
+            <td>25.0</td><td>47.9</td><td>23.8</td><td>45.9</td>
+          </tr>
+          <tr class="section-head"><td colspan="7">Trained on COCO (COCO = in-domain)</td></tr>
+          <tr>
+            <td>NegCLIP <span class="venue-tag">ICLR'23</span></td><td>FT</td><td>151M</td>
+            <td>41.0</td><td>68.6</td><td>28.0</td><td>50.2</td>
+          </tr>
+          <tr>
+            <td>NegationCLIP <span class="venue-tag">ICCV'25</span></td><td>FT</td><td>151M</td>
+            <td>38.6</td><td>65.8</td><td class="best">29.3</td><td class="best">53.8</td>
+          </tr>
+          <tr>
+            <td>NegCLIP + NF <span class="venue-tag">CVPR'25</span></td><td>FT</td><td>151M</td>
+            <td class="best">41.3</td><td class="best">69.0</td><td>29.2</td><td>51.5</td>
+          </tr>
+          <tr>
+            <td>DCSM<sup>&dagger;</sup> <span class="venue-tag">ICCV'25</span></td><td>PH</td><td>3.0M</td>
+            <td>10.6</td><td>28.6</td><td>19.4</td><td>41.2</td>
+          </tr>
+          <tr class="ours">
+            <td>PeakPatch</td><td>PH</td><td>5.2M</td>
+            <td>37.1</td><td>64.3</td><td>26.2</td><td>49.0</td>
+          </tr>
+          <tr class="section-head"><td colspan="7">Trained without COCO (fully out-of-distribution)</td></tr>
+          <tr>
+            <td>CoN-CLIP <span class="venue-tag">WACV'25</span></td><td>FT</td><td>151M</td>
+            <td>25.7</td><td>50.1</td><td>23.3</td><td>45.4</td>
+          </tr>
+          <tr>
+            <td>CLIP + NF <span class="venue-tag">CVPR'25</span></td><td>FT</td><td>151M</td>
+            <td>30.4</td><td>55.0</td><td>28.4</td><td>51.6</td>
+          </tr>
+          <tr class="ours">
+            <td>PeakPatch</td><td>PH</td><td>5.2M</td>
+            <td class="best">31.4</td><td class="best">56.9</td><td class="best">29.1</td><td class="best">53.7</td>
+          </tr>
+        </tbody>
+        <caption>
+          <b>Negation retrieval (text&rarr;image, %) on NegBench.</b>
+          FT = encoder fine-tuning; PH = post-hoc (frozen backbone). In the fully OOD setting,
+          PeakPatch beats every fine-tuning baseline while training 29&times; fewer parameters.
+          <span class="note"><sup>&dagger;</sup> Uses ViT-B/16 backbone. NF = NegFull fine-tuning data.</span>
+        </caption>
+      </table>
+    </div>
+
+    <h3>Text-to-image generation &amp; backbone generalization</h3>
+    <div class="tbl-wrap">
+      <table style="min-width: 380px;">
+        <thead>
+          <tr><th>Method</th><th>Aff</th><th>Neg</th><th>Comb</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>CLIP</td><td>97.4</td><td>29.2</td><td>28.3</td></tr>
+          <tr class="rule-top"><td>NegCLIP</td><td class="best">98.8</td><td>24.5</td><td>23.7</td></tr>
+          <tr><td>NegationCLIP</td><td class="best">98.8</td><td>45.2</td><td>44.5</td></tr>
+          <tr class="ours"><td>PeakPatch (ECN only)</td><td>98.1</td><td class="best">47.6</td><td class="best">45.8</td></tr>
+        </tbody>
+        <caption>
+          <b>Text-to-image generation with negated prompts (%).</b> Images generated with a frozen
+          GALIP generator on 107 negation prompts, correctness judged by Gemma-3-27B.
+          Aff: affirmative object present. Neg: negated attribute absent. Comb: Aff &times; Neg.
+        </caption>
+      </table>
+    </div>
+
+    <div class="tbl-wrap" style="margin-top: 34px;">
+      <table style="min-width: 440px;">
+        <thead>
+          <tr>
+            <th rowspan="2">Architecture</th>
+            <th class="group" colspan="2">Base</th>
+            <th class="group" colspan="2">+ PeakPatch</th>
+          </tr>
+          <tr><th>COCO</th><th>VOC</th><th>COCO</th><th>VOC</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>CLIP ViT-B/32</td><td>39.2</td><td>37.9</td><td class="best">74.3</td><td class="best">65.5</td></tr>
+          <tr><td>CLIP ViT-L/14</td><td>40.6</td><td>38.0</td><td class="best">63.8</td><td class="best">52.5</td></tr>
+          <tr><td>SigLIP ViT-B/16</td><td>28.9</td><td>30.8</td><td class="best">66.4</td><td class="best">55.3</td></tr>
+        </tbody>
+        <caption>
+          <b>Generalization across architectures (NegBench MCQ Avg, %).</b>
+          PeakPatch consistently improves negation understanding across diverse VLM backbones
+          without architecture-specific tuning.
+        </caption>
+      </table>
+    </div>
+
+    <h3>Ablation</h3>
+    <div class="tbl-wrap">
+      <table style="min-width: 440px;">
+        <thead>
+          <tr>
+            <th rowspan="2">Variant</th>
+            <th class="group" colspan="2">MCQ</th>
+            <th class="group" colspan="1">Retrieval</th>
+          </tr>
+          <tr><th>Neg</th><th>Avg</th><th>R@5</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>CLIP (baseline)</td><td>6.6</td><td>39.2</td><td>47.9</td></tr>
+          <tr class="rule-top"><td>ECN only</td><td>16.5</td><td>51.2</td><td>58.2</td></tr>
+          <tr><td>SCN only</td><td class="best">67.3</td><td>71.6</td><td>48.1</td></tr>
+          <tr><td>w/o anchor layer <i>l<sub>a</sub></i></td><td>61.7</td><td>68.7</td><td>60.5</td></tr>
+          <tr><td>Detached SCN</td><td>57.3</td><td>67.1</td><td class="best">64.8</td></tr>
+          <tr class="ours rule-top"><td>PeakPatch (joint)</td><td>63.2</td><td class="best">74.3</td><td>64.3</td></tr>
+        </tbody>
+        <caption>
+          <b>Ablation study on COCO (%).</b> Either module alone is lopsided &mdash; SCN wins MCQ but
+          does nothing for retrieval, ECN helps retrieval but under-corrects MCQ. Joint training is
+          what buys both. Removing the anchor layer or detaching the SCN gradient each costs
+          5&ndash;7 points of MCQ average.
+        </caption>
+      </table>
+    </div>
+
+    <div class="narrow lead" style="margin-top: 34px;">
+      <h3>Standard retrieval is preserved</h3>
+      <p>
+        Because PeakPatch corrects every query without gating, it must not damage ordinary retrieval.
+        On standard affirmative MSCOCO&nbsp;5K and Flickr30K&nbsp;1K text-to-image retrieval, the
+        ECN-corrected embeddings slightly <em class="term">improve</em> over frozen CLIP:
+        R@1 rises 29.9&nbsp;&rarr;&nbsp;32.1 and 57.9&nbsp;&rarr;&nbsp;60.4 respectively.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= ANALYSIS ================= -->
+  <section>
+    <h2>What the correction does</h2>
+
+    <figure>
+      <img class="framed" src="static/images/tsne_objects.png" alt="t-SNE: before correction affirmative and negated captions overlap; after correction they separate.">
+      <figcaption class="narrow">
+        <b>t-SNE of text embeddings for 10 object categories.</b> Circles: affirmative captions;
+        crosses: negated captions; colors: object categories.
+        <em>Left:</em> original CLIP embeddings &mdash; affirmative and negated overlap within each object.
+        <em>Right:</em> after ECN correction &mdash; affirmative captions stay in tight per-category
+        clusters while negated captions separate into a looser shared region, matching the
+        set-valued nature of negation.
+      </figcaption>
+    </figure>
+
+    <figure style="margin-top: 44px;">
+      <img class="plot framed" src="static/images/ecn_attention_heatmap.png" alt="ECN cross-attention concentrates on negation cue tokens.">
+      <figcaption class="narrow">
+        <b>ECN cross-attention.</b> The learned query concentrates on the negation cue tokens without
+        any syntactic parser or hand-specified negation lexicon &mdash; the mechanism is discovered
+        end-to-end.
+      </figcaption>
+    </figure>
+
+  </section>
+
+  <!-- ================= BIBTEX ================= -->
+  <section id="bibtex">
+    <h2>BibTeX</h2>
+    <div class="narrow">
+<pre><code>@inproceedings{lu2026peakpatch,
+  title         = {What CLIP Knows but Cannot Say: Recovering Negation
+                   from Frozen Intermediate Features},
+  author        = {Lu, Chen-Yi and Chen, Yueh-Shao and Chaterji, Somali},
+  booktitle     = {European Conference on Computer Vision (ECCV)},
+  year          = {2026},
+  eprint        = {2607.23271},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV}
+}</code></pre>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    Purdue University &middot; ECCV 2026 Oral<br>
+    Page source under the MIT License &middot; code release to follow.
+  </div>
+</footer>
+
+</body>
+</html>
