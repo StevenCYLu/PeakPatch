@@ -1,11 +1,4 @@
-"""Train EmbeddingCorrector with learned query (no negation detector needed).
-
-Same pipeline as the original token DP training but without negator mask computation.
-The model learns to discover negation-relevant positions via attention.
-
-Usage:
-    uv run python scripts/train_ec.py --exp-name tadp_v2_default
-"""
+"""Train EmbeddingCorrector with learned query (no negation detector needed)."""
 
 import argparse
 import json
@@ -142,7 +135,6 @@ def main():
     print(f"Target layer: {args.target_layer}, Anchor layer: {args.anchor_layer}")
     print(f"No anchor: {args.no_anchor}")
 
-    # Load frozen CLIP
     import open_clip
     from peakpatch.clip_utils import _get_text_encoder
     print(f"\nLoading frozen CLIP: {args.clip_model} ({args.clip_pretrained})")
@@ -154,12 +146,10 @@ def main():
     for p in clip_model.parameters():
         p.requires_grad = False
 
-    # Auto-detect embed_dim from CLIP model
     text_enc = _get_text_encoder(clip_model)
     embed_dim = text_enc.ln_final.weight.shape[0]
     print(f"  Detected embed_dim: {embed_dim}")
 
-    # Load data
     print(f"\nLoading training data from {args.train_dir}...")
     train_ds = EmbeddingCorrectorDataset(args.train_dir, args.max_train_samples)
     print(f"  Train samples: {len(train_ds)}")
@@ -173,7 +163,6 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=4, pin_memory=True)
 
-    # Create model
     model = EmbeddingCorrector(
         embed_dim=embed_dim,
         hidden_dim=args.hidden_dim,

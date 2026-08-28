@@ -1,15 +1,4 @@
-"""Loss functions for ScoreCorrector and joint EC+SC training.
-
-ScoreCorrectorLoss supports three modes:
-- mcq: MCQ cross-entropy + regularization (original)
-- contrastive: Symmetric InfoNCE over B x B score matrix + regularization
-- combined: Both losses weighted together
-
-JointLoss for EC+SC joint training:
-- EC InfoNCE: contrastive loss on EC-corrected similarity matrices
-- SC CE: cross-entropy on MCQ scores + correction regularization
-- Combined: L_ec_infonce + lambda_sc * L_sc_ce
-"""
+"""Loss functions for ScoreCorrector and joint EC+SC training."""
 
 from typing import Dict, Tuple
 
@@ -19,10 +8,7 @@ import torch.nn.functional as F
 
 
 class ScoreCorrectorLoss(nn.Module):
-    """Loss module for ScoreCorrector training.
-
-    Supports MCQ, contrastive (InfoNCE), and combined loss modes.
-    """
+    """Loss module for ScoreCorrector training."""
 
     def __init__(
         self,
@@ -36,20 +22,6 @@ class ScoreCorrectorLoss(nn.Module):
         label_smoothing: float = 0.0,
         anti_mode: str = "hinge",
     ):
-        """Initialize loss module.
-
-        Args:
-            lambda_reg: Weight for correction regularization loss.
-            temperature: Softmax temperature for scoring.
-            loss_type: One of "mcq", "contrastive", "combined".
-            alpha_mcq: Weight for MCQ loss in combined mode.
-            alpha_anti: Weight for anti-contrastive loss (0 = disabled).
-            anti_margin: Margin for the hinge anti-contrastive loss.
-            anti_topk: K for the hinge loss.
-            label_smoothing: Label smoothing for cross-entropy losses (0.0 = off).
-            anti_mode: "hinge" for separate anti-contrastive loss, "expanded"
-                to put negated texts in the InfoNCE denominator as hard negatives.
-        """
         super().__init__()
         if loss_type not in ("mcq", "contrastive", "combined"):
             raise ValueError(f"Unknown loss_type: {loss_type}")
@@ -71,16 +43,7 @@ class ScoreCorrectorLoss(nn.Module):
         mcq_corrections: torch.Tensor,
         mcq_labels: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute MCQ loss (unchanged for backward compat).
-
-        Args:
-            mcq_scores: [B, 4] corrected scores for MCQ options
-            mcq_corrections: [B, 4] raw correction values
-            mcq_labels: [B] correct option indices (0-3)
-
-        Returns:
-            Tuple of (total_loss, loss_dict with individual components)
-        """
+        """Compute MCQ loss (unchanged for backward compat)."""
         logits = mcq_scores / self.temperature
         L_mcq = F.cross_entropy(logits, mcq_labels, label_smoothing=self.label_smoothing)
 
@@ -101,15 +64,7 @@ class ScoreCorrectorLoss(nn.Module):
         scores: torch.Tensor,
         corrections: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute symmetric InfoNCE contrastive loss.
-
-        Args:
-            scores: [B, B] corrected score matrix (scores[i,j] = sim(img_i, txt_j))
-            corrections: [B, B] correction values
-
-        Returns:
-            Tuple of (total_loss, metrics_dict)
-        """
+        """Compute symmetric InfoNCE contrastive loss."""
         B = scores.shape[0]
         labels = torch.arange(B, device=scores.device)
 
@@ -142,15 +97,7 @@ class ScoreCorrectorLoss(nn.Module):
         neg_scores: torch.Tensor,
         neg_corrections: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute hinge-based anti-contrastive loss on known negative pairs.
-
-        Args:
-            neg_scores: [B, B] score matrix where diagonal = known non-match
-            neg_corrections: [B, B] correction values (for metrics only)
-
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
+        """Compute hinge-based anti-contrastive loss on known negative pairs."""
         B = neg_scores.shape[0]
         K = min(self.anti_topk, B - 1)
 
@@ -190,20 +137,7 @@ class ScoreCorrectorLoss(nn.Module):
         mcq_corrections: torch.Tensor,
         mcq_labels: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute combined loss with negated texts in the InfoNCE denominator.
-
-        Args:
-            pos_scores: [B, B] positive score matrix (img_i, txt_j)
-            pos_corrections: [B, B] positive corrections
-            neg_scores: [B, B] negated score matrix (img_i, neg_txt_j)
-            neg_corrections: [B, B] negated corrections
-            mcq_scores: [B, 4] MCQ scores
-            mcq_corrections: [B, 4] MCQ corrections
-            mcq_labels: [B] correct option indices
-
-        Returns:
-            Tuple of (total_loss, metrics_dict)
-        """
+        """Compute combined loss with negated texts in the InfoNCE denominator."""
         B = pos_scores.shape[0]
         labels = torch.arange(B, device=pos_scores.device)
 
@@ -261,20 +195,7 @@ class ScoreCorrectorLoss(nn.Module):
         anti_scores: torch.Tensor = None,
         anti_corrections: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute combined contrastive + MCQ + anti-contrastive loss.
-
-        Args:
-            contrastive_scores: [B, B] score matrix
-            contrastive_corrections: [B, B] corrections
-            mcq_scores: [B, 4] MCQ scores
-            mcq_corrections: [B, 4] MCQ corrections
-            mcq_labels: [B] correct option indices
-            anti_scores: Optional [B, B] negated score matrix
-            anti_corrections: Optional [B, B] negated corrections
-
-        Returns:
-            Tuple of (total_loss, metrics_dict)
-        """
+        """Compute combined contrastive + MCQ + anti-contrastive loss."""
         if self.anti_mode == "expanded" and anti_scores is not None:
             return self._forward_combined_expanded(
                 contrastive_scores, contrastive_corrections,
@@ -341,15 +262,7 @@ class ScoreCorrectorLoss(nn.Module):
         mcq_scores: torch.Tensor,
         mcq_labels: torch.Tensor,
     ) -> float:
-        """Compute MCQ accuracy for a batch.
-
-        Args:
-            mcq_scores: [B, 4] corrected scores
-            mcq_labels: [B] correct option indices
-
-        Returns:
-            Accuracy as float between 0 and 1
-        """
+        """Compute MCQ accuracy for a batch."""
         with torch.no_grad():
             predictions = mcq_scores.argmax(dim=1)
             accuracy = (predictions == mcq_labels).float().mean().item()
@@ -362,17 +275,7 @@ class ScoreCorrectorLoss(nn.Module):
         mcq_labels: torch.Tensor,
         anchor_layer: int = 12,
     ) -> float:
-        """Compute baseline CLIP MCQ accuracy (no correction).
-
-        Args:
-            mcq_layers: {layer_idx: [B, 4, D]} MCQ features
-            image_emb: [B, D] image embeddings
-            mcq_labels: [B] correct option indices
-            anchor_layer: Which layer to use as baseline
-
-        Returns:
-            Baseline accuracy as float
-        """
+        """Compute baseline CLIP MCQ accuracy (no correction)."""
         with torch.no_grad():
             mcq_L12 = mcq_layers[anchor_layer]
             baseline_scores = torch.bmm(
@@ -384,13 +287,7 @@ class ScoreCorrectorLoss(nn.Module):
 
 
 class JointLoss(nn.Module):
-    """Loss module for joint EC+SC training.
-
-    Combines:
-    - EC InfoNCE: contrastive loss on EC-corrected similarity matrices
-    - SC CE: cross-entropy on MCQ scores + correction regularization
-    - Total: L_ec + lambda_sc * L_sc
-    """
+    """Loss module for joint EC+SC training."""
 
     def __init__(
         self,
@@ -400,18 +297,6 @@ class JointLoss(nn.Module):
         lambda_reg: float = 0.1,
         lambda_reg_nonneg: float = 0.0,
     ):
-        """Initialize JointLoss.
-
-        Args:
-            logit_scale: Fixed logit scale for EC InfoNCE (CLIP uses ~100)
-            sc_temperature: Temperature for SC MCQ cross-entropy
-            lambda_sc: Weight for SC loss relative to EC loss
-            lambda_reg: Weight for SC correction regularization (negation options)
-            lambda_reg_nonneg: Extra regularization weight for non-negation options.
-                When > 0, non-negation corrections are penalized with
-                (lambda_reg + lambda_reg_nonneg) while negation corrections
-                use lambda_reg only.
-        """
         super().__init__()
         self.logit_scale = logit_scale
         self.sc_temperature = sc_temperature
@@ -424,28 +309,13 @@ class JointLoss(nn.Module):
         S_orig: torch.Tensor,
         S_neg: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute EC InfoNCE loss on corrected similarity matrices.
-
-        I2T: for each image, score against [orig_texts, neg_texts] -> [B, 2B]
-             target = diagonal of orig block (index 0..B-1)
-        T2I: for each orig text, score against all images -> [B, B]
-             target = diagonal
-
-        Args:
-            S_orig: [B, B] similarity matrix (image_i, orig_text_j) after EC
-            S_neg: [B, B] similarity matrix (image_i, neg_text_j) after EC
-
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
+        """Compute EC InfoNCE loss on corrected similarity matrices."""
         B = S_orig.shape[0]
         labels = torch.arange(B, device=S_orig.device)
 
-        # I2T: [B, 2B] with orig texts first, neg texts second
         logits_i2t = torch.cat([S_orig, S_neg], dim=1) * self.logit_scale
         L_i2t = F.cross_entropy(logits_i2t, labels)
 
-        # T2I: [B, B] orig texts only
         logits_t2i = S_orig.T * self.logit_scale
         L_t2i = F.cross_entropy(logits_t2i, labels)
 
@@ -469,19 +339,7 @@ class JointLoss(nn.Module):
         mcq_labels: torch.Tensor,
         neg_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute SC cross-entropy loss on MCQ scores.
-
-        Args:
-            mcq_scores: [B, 4] corrected MCQ scores
-            mcq_corrections: [B, 4] raw correction values
-            mcq_labels: [B] correct option indices (0-3)
-            neg_mask: [B, 4] bool, True if option contains negation.
-                When provided and lambda_reg_nonneg > 0, non-negation
-                corrections are penalized more heavily.
-
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
+        """Compute SC cross-entropy loss on MCQ scores."""
         logits = mcq_scores / self.sc_temperature
         L_ce = F.cross_entropy(logits, mcq_labels)
 
@@ -523,19 +381,7 @@ class JointLoss(nn.Module):
         mcq_labels: torch.Tensor,
         neg_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute combined joint loss.
-
-        Args:
-            S_orig: [B_ec, B_ec] EC-corrected orig similarity matrix
-            S_neg: [B_ec, B_ec] EC-corrected neg similarity matrix
-            mcq_scores: [B_sc, 4] SC MCQ scores
-            mcq_corrections: [B_sc, 4] SC correction values
-            mcq_labels: [B_sc] correct option indices
-            neg_mask: [B_sc, 4] bool, True if option contains negation
-
-        Returns:
-            Tuple of (total_loss, metrics_dict)
-        """
+        """Compute combined joint loss."""
         L_ec, ec_metrics = self.compute_ec_infonce(S_orig, S_neg)
         L_sc, sc_metrics = self.compute_sc_ce(
             mcq_scores, mcq_corrections, mcq_labels, neg_mask)

@@ -9,33 +9,14 @@ Chen-Yi Lu, Yueh-Shao Chen, Somali Chaterji &mdash; Purdue University
 
 ---
 
-CLIP maps semantically opposite phrases (&ldquo;a dog&rdquo; vs. &ldquo;not a dog&rdquo;) to nearly
-identical embeddings. We show this is **Representational Collapse**: the middle layers of the text
-encoder *do* build compositional structure, but the final layers overwrite it as visual alignment
-takes over.
-
-**PeakPatch** recovers the lost signal post-hoc, with **CLIP entirely frozen**. Two lightweight
-modules read intermediate features and write back into the standard cosine-similarity interface:
-
-1. **Embedding Correction Network (ECN)** &mdash; a learned query cross-attends over the full token
-   sequence at the compositional peak layer, anchored to a stable pre-alignment layer, and predicts
-   a deviation vector added to the collapsed final embedding (~4.7M params).
-2. **Score Correction Network (SCN)** &mdash; predicts a `tanh`-bounded scalar offset to the cosine
-   similarity for discriminative tasks such as MCQ (~0.5M params).
-
-Both are trained jointly end-to-end: InfoNCE for the ECN, `K`-way cross-entropy for the SCN. Because
-the SCN consumes ECN-corrected embeddings, its gradients flow back into the ECN, forcing one
-representation that serves both retrieval and discrimination.
-
-> **Scope of this release.** This repository covers the **negation MCQ** experiments: the released
-> checkpoints, the evaluation that reproduces the paper's MCQ table, and the full training pipeline
-> behind those checkpoints. The retrieval, text-to-image and LCD-analysis experiments are not
-> included here; see the paper and project page for those results.
+> **Scope.** This repository covers the **negation MCQ** experiments: the released checkpoints, the
+> evaluation, and the training pipeline behind them. Retrieval, text-to-image and LCD-analysis
+> experiments are in the paper and on the project page.
 
 > **Naming.** The paper calls the modules ECN and SCN; the code calls them `EmbeddingCorrector` and
 > `ScoreCorrector`. They are the same modules.
 
-## Results reproduced by this repository
+## Results
 
 NegBench MCQ accuracy (%), frozen CLIP ViT-B/32. Aff / Neg / Hyb are the affirmation, negation and
 hybrid question templates; Avg is over all questions.
@@ -47,8 +28,8 @@ hybrid question templates; Avg is over all questions.
 | CLIP, VOC2007 | 82.6 | 3.4 | 59.0 | **38.7** |
 | **PeakPatch, VOC2007** | **99.7** | **57.9** | **62.2** | **65.5** |
 
-COCO has 5,914 questions and VOC2007 has 5,031. Evaluation is deterministic: on one A100 the
-commands below reproduce 0.7433209 and 0.6547406 exactly.
+Evaluation is deterministic: on one A100 the commands below reproduce 0.7433209 and 0.6547406
+exactly.
 
 > The CLIP rows above are this repository's own measurements. The baseline columns in the paper are
 > quoted from the NegBench benchmark, so they differ from these by a few tenths of a point.
@@ -56,7 +37,7 @@ commands below reproduce 0.7433209 and 0.6547406 exactly.
 ## Installation
 
 ```bash
-pip install -e .
+uv sync
 ```
 
 Requires Python &ge; 3.10 and a CUDA-capable GPU (the evaluation needs ~2 GB of VRAM). The CLIP
@@ -66,14 +47,10 @@ backbone is downloaded by `open_clip` on first use; set `CLIP_CACHE_DIR` to cont
 
 Shipped in `checkpoints/`, no download needed:
 
-| File | Module | Params | Role |
+| File | Module | Params | Config |
 |---|---|--:|---|
-| `peakpatch_ecn.pt` | ECN | 4,728,833 | the paper's model &mdash; peak layer 8, anchor layer 6 |
-| `peakpatch_scn.pt` | SCN | 493,825 | the paper's model &mdash; layers [7, 12], bound 0.2 |
-| `init/ecn_pretrain.pt` | ECN | 4,728,833 | ECN-only pretraining, used to initialise joint training |
-| `init/scn_pretrain.pt` | SCN | 625,025 | SCN-only pretraining, used to initialise joint training |
-
-The two `init/` checkpoints are only needed to re-run training; evaluation uses the top two.
+| `peakpatch_ecn.pt` | ECN | 4,728,833 | peak layer 8, anchor layer 6 |
+| `peakpatch_scn.pt` | SCN | 493,825 | layers [7, 12], bound 0.2 |
 
 ## Data setup
 
@@ -107,7 +84,7 @@ The three paths can also be given as the environment variables `NEGBENCH_CSV_DIR
 ## Reproducing the paper's MCQ numbers
 
 ```bash
-python scripts/eval_mcq.py --tasks coco voc \
+uv run python scripts/eval_mcq.py --tasks coco voc \
     --negbench-csv-dir /path/to/negbench_csvs \
     --coco-image-root /path/to/coco_root \
     --voc-image-root  /path/to/voc_root \
@@ -124,26 +101,20 @@ coco_mcq-hybrid_accuracy: 0.6069     voc_mcq-hybrid_accuracy: 0.6221
 The frozen-backbone baseline row:
 
 ```bash
-python scripts/eval_mcq.py --model clip --tasks coco voc \
+uv run python scripts/eval_mcq.py --model clip --tasks coco voc \
     --negbench-csv-dir ... --coco-image-root ... --voc-image-root ...
 ```
 
 Any fine-tuned ViT-B/32 checkpoint (NegCLIP, CoN-CLIP, ...) can be scored the same way with
 `--model clip --clip-checkpoint /path/to/weights.pt`.
 
-JPEG decoding, not the GPU, is the bottleneck; `--num-workers` (default 8) sets the decode thread
-pool and does not affect the numbers.
-
 ## Training
-
-The released checkpoints come from the four stages below. Stages 1&ndash;2 are the expensive part;
-stage 4 takes about an hour on one A100.
 
 **1. Build the training data** from COCO train2014 &mdash; object-absence negated captions for the
 ECN, and 4-way MCQ questions for the SCN. Both CSVs record absolute image paths:
 
 ```bash
-python scripts/prepare_coco_train.py \
+uv run python scripts/prepare_coco_train.py \
     --coco-dir /path/to/coco --output-dir data/coco_train_negation
 # -> coco_negcap_train2014.csv, coco_negmcq_train2014.csv
 ```
@@ -155,40 +126,24 @@ ViT-L/14:
 ```bash
 # negcap features for the ECN, split 90/10
 for split in train val; do
-  python scripts/extract_negcap_features.py \
+  uv run python scripts/extract_negcap_features.py \
       --input-csv data/coco_train_negation/coco_negcap_train2014.csv \
       --output-dir data/negcap/$split \
       --model ViT-B-32 --split $split --split-ratio 0.9 --seed 42
 done
 
 # per-layer [EOS] features for the SCN
-python scripts/extract_features.py \
+uv run python scripts/extract_features.py \
     --input-csv data/coco_train_negation/coco_negmcq_train2014.csv \
     --image-root / --output-dir data/mcq/train \
     --model ViT-B-32 --layers 3 7 8 12
 ```
 
-**3. Pre-train the ECN** (or skip and use the shipped `checkpoints/init/ecn_pretrain.pt`):
+**3. Train.** The ECN and SCN are trained together from randomly initialised weights, in one run of
+about an hour on a single A100:
 
 ```bash
-python scripts/train_ec.py --exp-name ecn_pretrain \
-    --train-dir data/negcap/train --val-dir data/negcap/val \
-    --target-layer 8 --anchor-layer 6
-```
-
-The SCN is also pre-trained on its own, over layers [3, 8, 12]:
-
-```bash
-python scripts/train_sc.py --exp-name scn_pretrain --max-correction 0.20 \
-    --data-dir data/mcq/train --val-dir data/mcq/val --layers 3 8 12
-```
-
-**4. Train jointly** &mdash; this produces the released checkpoints:
-
-```bash
-python scripts/train_joint.py --exp-name peakpatch \
-    --ec-checkpoint checkpoints/init/ecn_pretrain.pt \
-    --sc-checkpoint checkpoints/init/scn_pretrain.pt \
+uv run python scripts/train_joint.py --exp-name peakpatch \
     --negcap-train-dir data/negcap/train --negcap-val-dir data/negcap/val \
     --mcq-train-dir data/mcq/train --mcq-val-dir data/mcq/val \
     --target-layer 8 --anchor-layer 6 --sc-layers 7 12 \
@@ -197,55 +152,7 @@ python scripts/train_joint.py --exp-name peakpatch \
     --output-dir results/joint
 ```
 
-Note what the two initialisations do here. The ECN is warm-started from `ecn_pretrain.pt`. The SCN
-is not: because `--sc-layers 7 12` selects two layers where the pre-trained SCN has three, the
-weights are dimensionally incompatible and `train_joint.py` builds a fresh SCN, reading only the
-hyperparameters (`context_dim`, `max_correction`, `dropout`) from the checkpoint. This is how the
-released model was trained. Pass `--from-scratch` to skip both initialisations.
-
-## Feature layouts
-
-`scripts/extract_features.py` writes the MCQ layout read by `NegBenchDataset`:
-
-```
-data_dir/
-  text_layer_{L}.pt   # [N, 512]    per-layer [EOS] features for the query caption
-  mcq_layer_{L}.pt    # [N, 4, 512] per-layer [EOS] features for the four options
-  image_emb.pt        # [N, 512]    frozen CLIP image embeddings
-  mcq_labels.pt       # [N]         index of the correct option
-  metadata.json
-```
-
-`scripts/extract_negcap_features.py` writes the contrastive layout read by
-`EmbeddingCorrectorDataset`:
-
-```
-data_dir/
-  negated_token_ids.pt   # [N, 77]  BPE token IDs for the negated caption
-  original_layer_12.pt   # [N, 512] final-layer embedding, original caption
-  negated_layer_12.pt    # [N, 512] final-layer embedding, negated caption
-```
-
-## Repository layout
-
-```
-PeakPatch/
-  checkpoints/               released ECN + SCN weights
-  src/peakpatch/
-    model.py                 EmbeddingCorrector (ECN) + ScoreCorrector (SCN)
-    loss.py                  ScoreCorrectorLoss, JointLoss
-    dataset.py               feature datasets for both training streams
-    clip_utils.py            frozen-CLIP intermediate-layer extraction
-  scripts/
-    eval_mcq.py              reproduce the MCQ results
-    train_joint.py           joint ECN+SCN training (the released model)
-    train_ec.py              ECN-only pre-training
-    train_sc.py              SCN-only pre-training
-    prepare_coco_train.py    build negcap + MCQ training data from COCO
-    extract_negcap_features.py
-    extract_features.py
-  index.html, static/        project page (GitHub Pages)
-```
+`scripts/train_ec.py` and `scripts/train_sc.py` train either module on its own, for ablations.
 
 ## Citation
 

@@ -1,23 +1,4 @@
-"""Extract negcap features for any CLIP model.
-
-Reads a negcap CSV (image_path, original_caption, negated_caption) and extracts:
-- image_emb.pt [N, D]: normalized image embeddings
-- original_layer_12.pt [N, D]: normalized L12 CLS for original captions
-- negated_layer_12.pt [N, D]: normalized L12 CLS for negated captions
-- original_token_ids.pt [N, 77]: tokenized original captions
-- negated_token_ids.pt [N, 77]: tokenized negated captions
-- metadata.json
-
-Saves shards periodically so partial progress survives timeouts.
-On restart, existing shards are skipped automatically.
-
-Usage:
-    uv run python scripts/extract_negcap_features.py \
-        --input-csv /path/to/negcap.csv \
-        --output-dir data/negcap_vitl14_train \
-        --model ViT-L-14 \
-        --split train --split-ratio 0.9 --seed 42
-"""
+"""Extract negcap features for any CLIP model."""
 
 import argparse
 import json
@@ -32,7 +13,7 @@ from PIL import Image
 from tqdm import tqdm
 
 CLIP_CACHE_DIR = os.environ.get("CLIP_CACHE_DIR") or None
-SHARD_SIZE = 500  # Save a shard every N batches
+SHARD_SIZE = 500
 
 
 def extract_text_l12_cls(texts, model, tokenizer, device):
@@ -117,12 +98,10 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if already fully done
     if (output_dir / "metadata.json").exists():
         print(f"Already complete: {output_dir / 'metadata.json'} exists. Skipping.")
         return
 
-    # Load CLIP
     import open_clip
     print(f"Loading CLIP: {args.model} ({args.pretrained})")
     model, _, preprocess = open_clip.create_model_and_transforms(
@@ -137,7 +116,6 @@ def main():
     embed_dim = text_enc.ln_final.weight.shape[0]
     print(f"  embed_dim: {embed_dim}")
 
-    # Load and split CSV
     print(f"Loading CSV: {args.input_csv}")
     df = pd.read_csv(args.input_csv)
     total = len(df)
@@ -155,18 +133,15 @@ def main():
     N = len(df)
     n_batches = (N + args.batch_size - 1) // args.batch_size
 
-    # Shard directory
     shard_dir = output_dir / "_shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find existing shards to resume from
     existing_shards = sorted(shard_dir.glob("image_emb_*.pt"))
     start_shard = len(existing_shards)
     start_batch = start_shard * SHARD_SIZE
     if start_shard > 0:
         print(f"  Resuming: found {start_shard} shards, skipping first {start_batch} batches")
 
-    # Extraction loop with prefetching: load next batch on CPU while GPU processes current
     buf_image, buf_orig_cls, buf_neg_cls, buf_orig_ids, buf_neg_ids = [], [], [], [], []
     shard_idx = start_shard
     batch_in_shard = 0
@@ -200,18 +175,15 @@ def main():
     pool = ThreadPoolExecutor(max_workers=args.num_workers)
     prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
-    # Prefetch first batch
     if active_batches:
         first_num, first_start = active_batches[0]
         first_end = min(first_start + args.batch_size, N)
         prefetch_future = prefetch_pool.submit(_load_batch, df.iloc[first_start:first_end])
 
     for idx, (batch_num, start) in enumerate(tqdm(active_batches, desc="Extracting")):
-        # Get prefetched result
         valid_imgs, valid_orig, valid_neg, n_bad = prefetch_future.result()
         n_skipped += n_bad
 
-        # Kick off prefetch for NEXT batch before doing GPU work
         if idx + 1 < len(active_batches):
             next_num, next_start = active_batches[idx + 1]
             next_end = min(next_start + args.batch_size, N)
@@ -252,17 +224,14 @@ def main():
     pool.shutdown()
     prefetch_pool.shutdown()
 
-    # Save remaining buffer as final shard
     if buf_image:
         save_shard(shard_dir, shard_idx, buf_image, buf_orig_cls, buf_neg_cls, buf_orig_ids, buf_neg_ids)
         print(f"  Saved shard {shard_idx} ({sum(x.shape[0] for x in buf_image)} samples)")
         shard_idx += 1
 
-    # Concatenate all shards into final files
     print(f"\nSkipped {n_skipped} samples (missing images)")
     n_total = concat_shards(shard_dir, output_dir)
 
-    # Save metadata (marks completion)
     metadata = {
         "num_samples": n_total,
         "selected_layers": [12],

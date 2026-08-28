@@ -1,11 +1,4 @@
-"""Dataset classes for pre-extracted NegBench features.
-
-Two dataset types:
-- NegBenchDataset: MCQ training data (image, text, 4 MCQ options)
-- EmbeddingCorrectorDataset: Token-level DP training data (token IDs + CLS targets)
-
-Expected directory layouts documented in each class.
-"""
+"""Dataset classes for pre-extracted NegBench features."""
 
 import json
 from pathlib import Path
@@ -18,24 +11,7 @@ from torch.utils.data import Dataset
 
 
 class NegBenchDataset(Dataset):
-    """Dataset for pre-extracted NegBench features.
-
-    Supports two loading modes:
-    - load_to_memory=True: Load all data into RAM (fast training, high memory)
-    - load_to_memory=False: Memory-map .npy files (instant startup, low memory)
-
-    Expected directory layout:
-        data_dir/
-            text_layer_03.pt/.npy      # [N, 512] - Layer 3 text features
-            text_layer_08.pt/.npy      # [N, 512] - Layer 8 text features
-            text_layer_12.pt/.npy      # [N, 512] - Layer 12 text features
-            image_emb.pt/.npy          # [N, 512] - Image embeddings
-            mcq_layer_03.pt/.npy       # [N, 4, 512] - Layer 3 MCQ option features
-            mcq_layer_08.pt/.npy       # [N, 4, 512] - Layer 8 MCQ option features
-            mcq_layer_12.pt/.npy       # [N, 4, 512] - Layer 12 MCQ option features
-            mcq_labels.pt/.npy         # [N] - Correct option indices (0-3)
-            metadata.json              # Dataset metadata and sample info
-    """
+    """Dataset for pre-extracted NegBench features."""
 
     def __init__(
         self,
@@ -44,15 +20,6 @@ class NegBenchDataset(Dataset):
         load_to_memory: bool = False,
         shuffle_mcq: bool = True,
     ):
-        """Initialize the dataset.
-
-        Args:
-            data_dir: Directory containing extracted features
-            layers: Which layers to load (default: [3, 8, 12])
-            load_to_memory: Whether to load all features into RAM.
-            shuffle_mcq: Whether to randomly shuffle MCQ option order during
-                training. This is CRITICAL for learning.
-        """
         self.data_dir = Path(data_dir)
         self.layers = layers if layers is not None else [3, 8, 12]
         self.load_to_memory = load_to_memory
@@ -145,15 +112,7 @@ class NegBenchDataset(Dataset):
             return data.clone()
 
     def __getitem__(self, idx: int) -> Dict:
-        """Get a single sample.
-
-        Returns:
-            Dict with:
-                text_layers: {layer_idx: tensor [D]}
-                image_emb: tensor [D]
-                mcq_layers: {layer_idx: tensor [4, D]}
-                mcq_label: int
-        """
+        """Get a single sample."""
         original_label = int(self.mcq_labels[idx])
 
         mcq_layers_raw = {
@@ -184,34 +143,16 @@ class NegBenchDataset(Dataset):
         }
 
 
-
 class EmbeddingCorrectorDataset(Dataset):
-    """Dataset for EmbeddingCorrector training.
-
-    Loads pre-extracted token IDs (from extract_token_ids.py) and
-    pre-extracted CLS features for target deviation computation.
-    CLIP forward pass happens on-the-fly during training.
-
-    Returns (token_ids, neg_L12_cls, target) where:
-        - token_ids [77]: int32 BPE token IDs for CLIP forward pass
-        - neg_L12_cls [512]: normalized negated L12 CLS embedding (projected)
-        - target [512]: deviation = normalize(original_L12) - normalize(negated_L12)
-    """
+    """Dataset for EmbeddingCorrector training."""
 
     def __init__(
         self,
         data_dir: str,
         max_samples: int = None,
     ):
-        """Initialize EmbeddingCorrectorDataset.
-
-        Args:
-            data_dir: Directory containing negated_token_ids.pt and layer .pt files
-            max_samples: Limit number of samples (None = all)
-        """
         data_dir = Path(data_dir)
 
-        # Load token IDs
         token_ids_path = data_dir / "negated_token_ids.pt"
         if not token_ids_path.exists():
             raise FileNotFoundError(
@@ -220,7 +161,6 @@ class EmbeddingCorrectorDataset(Dataset):
             )
         self.token_ids = torch.load(token_ids_path, map_location="cpu", weights_only=True)
 
-        # Load L12 CLS features for target computation
         self.neg_L12 = torch.load(
             data_dir / "negated_layer_12.pt", map_location="cpu", weights_only=True)
         self.orig_L12 = torch.load(
@@ -230,7 +170,6 @@ class EmbeddingCorrectorDataset(Dataset):
         if max_samples and max_samples < self.N:
             self.N = max_samples
 
-        # Precompute target deltas
         orig_norm = F.normalize(self.orig_L12[:self.N], dim=-1)
         neg_norm = F.normalize(self.neg_L12[:self.N], dim=-1)
         self.target_delta = orig_norm - neg_norm
@@ -241,14 +180,7 @@ class EmbeddingCorrectorDataset(Dataset):
         return self.N
 
     def __getitem__(self, idx):
-        """Get a single sample.
-
-        Returns:
-            Tuple of:
-                token_ids: [77] int32 BPE token IDs
-                neg_L12_cls: [512] normalized negated L12 CLS embedding
-                target: [512] target deviation vector
-        """
+        """Get a single sample."""
         token_ids = self.token_ids[idx]
         neg_L12_cls = F.normalize(self.neg_L12[idx], dim=-1)
         target = self.target_delta[idx]
@@ -256,19 +188,7 @@ class EmbeddingCorrectorDataset(Dataset):
 
 
 class NegcapJointDataset(Dataset):
-    """Dataset for negcap data used in joint EC+SC training.
-
-    Loads pre-extracted negcap data: original/negated token IDs and L12 CLS
-    embeddings plus image embeddings for InfoNCE contrastive loss.
-
-    Expected directory layout:
-        data_dir/
-            image_emb.pt              # [N, 512]
-            original_layer_12.pt      # [N, 512]
-            negated_layer_12.pt       # [N, 512]
-            original_token_ids.pt     # [N, 77]
-            negated_token_ids.pt      # [N, 77]
-    """
+    """Dataset for negcap data used in joint EC+SC training."""
 
     def __init__(self, data_dir: str, max_samples: int = None):
         data_dir = Path(data_dir)
@@ -304,20 +224,7 @@ class NegcapJointDataset(Dataset):
 
 
 class MCQJointDataset(Dataset):
-    """Dataset for MCQ data used in joint EC+SC training.
-
-    Loads pre-extracted vanilla CLIP MCQ features plus token IDs for
-    on-the-fly EC correction during training.
-
-    Expected directory layout:
-        data_dir/
-            image_emb.pt              # [N, 512]
-            mcq_layer_06.pt           # [N, 4, 512]
-            mcq_layer_08.pt           # [N, 4, 512]
-            mcq_layer_12.pt           # [N, 4, 512]
-            mcq_token_ids.pt          # [N, 4, 77]
-            mcq_labels.pt             # [N]
-    """
+    """Dataset for MCQ data used in joint EC+SC training."""
 
     def __init__(
         self,
@@ -356,7 +263,7 @@ class MCQJointDataset(Dataset):
             layer: self.mcq_features[layer][idx].clone()
             for layer in self.layers
         }
-        token_ids_raw = self.mcq_token_ids[idx].clone()  # [4, 77]
+        token_ids_raw = self.mcq_token_ids[idx].clone()
 
         if self.shuffle_mcq:
             perm = torch.randperm(4)
@@ -404,14 +311,7 @@ def mcq_collate_fn(batch: List[Dict]) -> Dict:
 
 
 def collate_fn(batch: List[Dict]) -> Dict:
-    """Custom collate function for nested dict structure.
-
-    Args:
-        batch: List of sample dicts from NegBenchDataset
-
-    Returns:
-        Batched dict with stacked tensors
-    """
+    """Custom collate function for nested dict structure."""
     layers = list(batch[0]["text_layers"].keys())
 
     return {

@@ -1,17 +1,4 @@
-"""Prepare COCO train2014 negation data for joint EC+SC training.
-
-Generates:
-1. negcap CSV: (image_path, original_caption, negated_caption, negation_type)
-   - Object-absence negation using COCO instance annotations
-2. MCQ CSV: (correct_answer, caption_0..3, correct_answer_template, image_path)
-   - 1 correct caption + 3 negated/cross-image distractors
-
-Usage:
-    uv run python scripts/prepare_coco_train.py \
-        --coco-dir /path/to/coco \
-        --output-dir data/coco_train_negation \
-        --seed 42
-"""
+"""Prepare COCO train2014 negation data for joint EC+SC training."""
 
 import argparse
 import json
@@ -22,7 +9,6 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-# Templates for negated captions
 NEGATION_TEMPLATES = {
     "no_X": [
         "{caption}, but there is no {object}",
@@ -63,16 +49,12 @@ def generate_negcap_row(
     absent_objects: list[str],
     rng: random.Random,
 ) -> tuple[str, str]:
-    """Generate one negated caption from a list of absent objects.
-
-    Returns (negated_caption, negation_type).
-    """
+    """Generate one negated caption from a list of absent objects."""
     obj = rng.choice(absent_objects)
     neg_type = rng.choice(["no_X", "without_X", "not_X"])
     templates = NEGATION_TEMPLATES[neg_type]
     template = rng.choice(templates)
 
-    # Clean up caption: remove trailing period for template insertion
     clean_cap = caption.rstrip(". ")
     negated = template.format(caption=clean_cap, object=obj)
 
@@ -85,29 +67,23 @@ def generate_mcq_row(
     cross_captions: list[str],
     rng: random.Random,
 ) -> tuple[int, list[str], str]:
-    """Generate an MCQ row with 1 correct + 3 distractors.
-
-    Returns (correct_answer_idx, [caption_0..3], answer_template).
-    """
+    """Generate an MCQ row with 1 correct + 3 distractors."""
     distractors = [negated_caption]
 
-    # Add up to 2 cross-image captions as additional distractors
     if len(cross_captions) >= 2:
         distractors.extend(rng.sample(cross_captions, 2))
     elif len(cross_captions) == 1:
         distractors.extend(cross_captions)
-        # Duplicate negated with different template if needed
         distractors.append(negated_caption.replace("but there is no", "without any"))
     else:
         distractors.append(negated_caption.replace("but there is no", "without any"))
         distractors.append(negated_caption.replace("but there is no", "and no"))
 
     captions = distractors[:3] + [correct_caption]
-    # Shuffle positions
     indices = list(range(4))
     rng.shuffle(indices)
     shuffled = [captions[i] for i in indices]
-    correct_idx = indices.index(3)  # Where did the correct caption end up?
+    correct_idx = indices.index(3)
 
     return correct_idx, shuffled, "positive"
 
@@ -140,20 +116,17 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load annotations
     print("Loading COCO annotations...")
     with open(coco_dir / "annotations" / "captions_train2014.json") as f:
         captions_data = json.load(f)
     with open(coco_dir / "annotations" / "instances_train2014.json") as f:
         instances_data = json.load(f)
 
-    # Build lookups
     cat_id_to_name = {c["id"]: c["name"] for c in instances_data["categories"]}
     all_cat_ids = set(cat_id_to_name.keys())
     img_cats = build_image_categories(instances_data)
     img_id_to_file = build_image_id_to_filename(instances_data)
 
-    # Build image_id -> list of captions
     img_captions = defaultdict(list)
     for ann in captions_data["annotations"]:
         img_captions[ann["image_id"]].append(ann["caption"])
@@ -162,14 +135,12 @@ def main():
     print(f"Images with objects: {len(img_cats)}")
     print(f"Object categories: {len(cat_id_to_name)}")
 
-    # Build a pool of captions per category for cross-image distractors
     cat_captions = defaultdict(list)
     for img_id, caps in img_captions.items():
         if img_id in img_cats:
             for cat_id in img_cats[img_id]:
-                cat_captions[cat_id].extend(caps[:1])  # Just first caption per image
+                cat_captions[cat_id].extend(caps[:1])
 
-    # Generate negcap and MCQ data
     negcap_rows = []
     mcq_rows = []
     skipped_no_absent = 0
@@ -195,10 +166,8 @@ def main():
         absent_objects = [cat_id_to_name[c] for c in absent_cats]
         captions = img_captions[img_id]
 
-        # Limit captions per image
         use_captions = captions[: args.max_captions_per_image]
 
-        # Collect cross-image captions (from images with different categories)
         present_cat_list = list(present_cats)
         cross_caps = []
         for cat_id in present_cat_list[:2]:
@@ -219,7 +188,6 @@ def main():
                     }
                 )
 
-                # Generate corresponding MCQ
                 correct_idx, mcq_captions, template = generate_mcq_row(
                     caption, negated, cross_caps, rng
                 )
@@ -239,7 +207,6 @@ def main():
     print(f"Generated {len(mcq_rows)} MCQ samples")
     print(f"Skipped {skipped_no_absent} images (no absent categories)")
 
-    # Shuffle and save
     rng.shuffle(negcap_rows)
     rng.shuffle(mcq_rows)
 
@@ -255,7 +222,6 @@ def main():
     print(f"\nSaved negcap CSV: {negcap_path} ({len(negcap_df)} rows)")
     print(f"Saved MCQ CSV: {mcq_path} ({len(mcq_df)} rows)")
 
-    # Save metadata
     neg_type_counts = negcap_df["negation_type"].value_counts().to_dict()
     metadata = {
         "num_negcap": len(negcap_df),

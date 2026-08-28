@@ -1,35 +1,4 @@
-"""Training script for ScoreCorrector model.
-
-Trains a small network (~631K params) that learns bounded corrections
-to CLIP's cosine similarity scores, using pre-extracted multi-layer
-features from CC12M.
-
-Supports three loss modes:
-- mcq: MCQ cross-entropy (original, 4 texts per image)
-- contrastive: Symmetric InfoNCE over B x B score matrix
-- combined: Both losses together
-
-Usage:
-    uv run python scripts/train.py \
-        --data-dir /path/to/cc12m_500k/train \
-        --val-dir /path/to/cc12m_500k/val \
-        --output-dir results/score_corrector
-
-    # Contrastive training
-    uv run python scripts/train.py \
-        --data-dir /path/to/cc12m_500k/train \
-        --val-dir /path/to/cc12m_500k/val \
-        --loss-type contrastive \
-        --batch-size 256
-
-    # Combined training
-    uv run python scripts/train.py \
-        --data-dir /path/to/cc12m_500k/train \
-        --val-dir /path/to/cc12m_500k/val \
-        --loss-type combined \
-        --alpha-mcq 1.0 \
-        --batch-size 256
-"""
+"""Training script for ScoreCorrector model."""
 
 import argparse
 import json
@@ -54,21 +23,15 @@ from peakpatch import ScoreCorrector, ScoreCorrectorLoss, NegBenchDataset, colla
 
 
 def sanity_check_contrastive(model: ScoreCorrector, dataloader: DataLoader, device: str):
-    """Verify score_contrastive matches score_pairwise on a small batch.
-
-    Runs both methods on the first batch and checks max absolute difference.
-    Raises AssertionError if they disagree by more than 1e-5.
-    """
+    """Verify score_contrastive matches score_pairwise on a small batch."""
     model.eval()
     batch = next(iter(dataloader))
     text_layers = {k: v.to(device) for k, v in batch["text_layers"].items()}
     image_emb = batch["image_emb"].to(device)
 
     with torch.no_grad():
-        # score_contrastive: [B, B]
         scores_c, _ = model.score_contrastive(text_layers, image_emb)
 
-        # score_pairwise: [B, B] (designed for eval)
         scores_p = model.score_pairwise(text_layers, image_emb, batch_size=256)
 
     max_diff = (scores_c - scores_p).abs().max().item()
@@ -84,24 +47,13 @@ def _extract_neg_layers(
     mcq_layers: Dict[int, torch.Tensor],
     mcq_labels: torch.Tensor,
 ) -> Dict[int, torch.Tensor]:
-    """Extract a random wrong MCQ option per sample as negated text features.
-
-    Args:
-        mcq_layers: {layer_idx: [B, 4, D]} MCQ option features
-        mcq_labels: [B] correct option indices
-
-    Returns:
-        neg_layers: {layer_idx: [B, D]} negated text features
-    """
+    """Extract a random wrong MCQ option per sample as negated text features."""
     B = mcq_labels.shape[0]
     device = mcq_labels.device
 
-    # Build mask of wrong options: [B, 4] with True for wrong options
     wrong_mask = torch.ones(B, 4, dtype=torch.bool, device=device)
     wrong_mask[torch.arange(B, device=device), mcq_labels] = False
 
-    # Pick a random wrong option index per sample
-    # wrong_mask has exactly 3 True values per row
     rand_within_wrong = torch.randint(3, (B,), device=device)
     wrong_indices = torch.zeros(B, dtype=torch.long, device=device)
     for i in range(B):
@@ -134,11 +86,7 @@ def train_epoch(
     alpha_anti: float = 0.0,
     anti_mode: str = "hinge",
 ) -> Dict[str, float]:
-    """Train for one epoch.
-
-    Returns:
-        Dict with metrics and updated global_step
-    """
+    """Train for one epoch."""
     model.train()
 
     total_loss = 0.0
@@ -162,7 +110,6 @@ def train_epoch(
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
     for batch_idx, batch in enumerate(pbar):
-        # Move to device
         text_layers = {k: v.to(device) for k, v in batch["text_layers"].items()}
         image_emb = batch["image_emb"].to(device)
         mcq_layers = {k: v.to(device) for k, v in batch["mcq_layers"].items()}
@@ -188,7 +135,6 @@ def train_epoch(
                 scores, corrections = model.score_contrastive(text_layers, image_emb)
                 mcq_scores, mcq_corrections = model.score_mcq(mcq_layers, image_emb)
 
-                # Anti-contrastive: score negated text against all images
                 anti_scores = None
                 anti_corrections = None
                 if alpha_anti > 0 or anti_mode == "expanded":
@@ -208,7 +154,6 @@ def train_epoch(
                 )
                 loss_dict["baseline_accuracy"] = baseline_acc
 
-        # Scale loss for gradient accumulation
         scaled_loss = loss / grad_accum_steps
         scaled_loss.backward()
 
@@ -216,7 +161,6 @@ def train_epoch(
         is_last_batch = (batch_idx + 1) == len(dataloader)
 
         if is_accumulation_step or is_last_batch:
-            # Gradient norm (for monitoring)
             grad_norm = 0.0
             for p in model.parameters():
                 if p.grad is not None:
@@ -227,7 +171,6 @@ def train_epoch(
             optimizer.step()
             optimizer.zero_grad()
 
-            # EMA update
             if ema_params is not None and ema_decay > 0:
                 with torch.no_grad():
                     for name, param in model.named_parameters():
@@ -242,7 +185,6 @@ def train_epoch(
 
             global_step += 1
 
-        # Accumulate metrics (every micro-batch)
         total_loss += loss_dict["loss_total"]
         total_reg_loss += loss_dict["loss_reg"]
         total_mean_corr += loss_dict["mean_abs_correction"]
@@ -272,7 +214,6 @@ def train_epoch(
 
         num_batches += 1
 
-        # Step-level wandb logging (only on optimizer steps)
         if (is_accumulation_step or is_last_batch) and use_wandb and WANDB_AVAILABLE and global_step % log_every == 0:
             step_log = {
                 "step": global_step,
@@ -306,7 +247,6 @@ def train_epoch(
                 step_log["step/neg_above_pos"] = loss_dict["neg_above_pos"]
             wandb.log(step_log, step=global_step)
 
-        # Progress bar
         if loss_type == "mcq":
             pbar.set_postfix({
                 "loss": f"{loss_dict['loss_total']:.4f}",
@@ -334,7 +274,6 @@ def train_epoch(
                 postfix["neg>pos"] = f"{loss_dict['neg_above_pos']:.3f}"
             pbar.set_postfix(postfix)
 
-    # Build return metrics
     metrics = {
         "loss_total": total_loss / num_batches,
         "loss_reg": total_reg_loss / num_batches,
@@ -372,11 +311,7 @@ def evaluate(
     loss_type: str = "mcq",
     anti_mode: str = "hinge",
 ) -> Dict[str, float]:
-    """Evaluate the model on a validation set.
-
-    Returns:
-        Dict with evaluation metrics
-    """
+    """Evaluate the model on a validation set."""
     model.eval()
 
     total_loss = 0.0
@@ -416,7 +351,6 @@ def evaluate(
             scores, corrections = model.score_contrastive(text_layers, image_emb)
             mcq_scores, mcq_corrections = model.score_mcq(mcq_layers, image_emb)
 
-            # Extract neg_layers for expanded mode validation
             anti_scores = None
             anti_corrections = None
             if anti_mode == "expanded":
@@ -502,11 +436,7 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: str, model: ScoreCorrector, optimizer=None, scheduler=None):
-    """Load training checkpoint.
-
-    Returns:
-        Tuple of (epoch, metrics, ema_params or None)
-    """
+    """Load training checkpoint."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -525,7 +455,6 @@ def main():
         description="Train ScoreCorrector model for score-level negation correction"
     )
 
-    # Data arguments
     parser.add_argument(
         "--data-dir", type=str, required=True,
         help="Directory with pre-extracted training features",
@@ -535,7 +464,6 @@ def main():
         help="Directory with pre-extracted validation features",
     )
 
-    # Model arguments
     parser.add_argument(
         "--layers", type=int, nargs="+", default=[3, 8, 12],
         help="CLIP layers to use",
@@ -588,7 +516,6 @@ def main():
         help="Maximum L2 norm of embedding delta (embedding mode)",
     )
 
-    # Loss arguments
     parser.add_argument(
         "--lambda-reg", type=float, default=0.1,
         help="Weight for correction regularization",
@@ -629,7 +556,6 @@ def main():
         "'expanded' to put negated texts in the InfoNCE denominator.",
     )
 
-    # Training arguments
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=512, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -662,7 +588,6 @@ def main():
         help="Stop if val metric doesn't improve for N epochs (0 = disabled)",
     )
 
-    # Output arguments
     parser.add_argument(
         "--output-dir", type=str, default="results/score_corrector",
         help="Output directory",
@@ -676,7 +601,6 @@ def main():
         help="Save checkpoint every N epochs",
     )
 
-    # Logging arguments
     parser.add_argument(
         "--use-wandb", action="store_true",
         help="Use Weights & Biases logging",
@@ -704,11 +628,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir = Path(args.output_dir)
 
-    # Experiment name
     if args.exp_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.exp_name = (
@@ -716,12 +638,10 @@ def main():
             f"_t{args.temperature}_ctx{args.context_dim}_{timestamp}"
         )
 
-    # Create directories
     exp_dir = output_dir / args.exp_name
     checkpoint_dir = exp_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save config
     config = vars(args)
     config["device"] = device
     with open(exp_dir / "config.json", "w") as f:
@@ -768,7 +688,6 @@ def main():
         print(f"Early stopping patience: {args.early_stopping_patience}")
     print("=" * 60)
 
-    # Initialize W&B
     use_wandb_logging = args.use_wandb and WANDB_AVAILABLE
     if args.use_wandb:
         if not WANDB_AVAILABLE:
@@ -790,7 +709,6 @@ def main():
             )
             print(f"W&B run: {wandb.run.url}")
 
-    # Create model
     print("\nCreating model...")
     model = ScoreCorrector(
         embed_dim=args.embed_dim,
@@ -810,7 +728,6 @@ def main():
     print(f"Parameters: {model.count_parameters():,}")
     print(f"Config: {model.get_model_info()}")
 
-    # Create loss function
     loss_fn = ScoreCorrectorLoss(
         lambda_reg=args.lambda_reg,
         temperature=args.temperature,
@@ -823,9 +740,7 @@ def main():
         anti_mode=args.anti_mode,
     )
 
-    # Load data
     print("\nLoading training data...")
-    # Use load_to_memory when .npy files aren't available (e.g. .pt only)
     use_mmap = (Path(args.data_dir) / "image_emb.npy").exists()
     train_dataset = NegBenchDataset(
         data_dir=args.data_dir,
@@ -866,7 +781,6 @@ def main():
             pin_memory=True,
         )
 
-    # Update wandb config
     if use_wandb_logging:
         wandb.config.update({
             "model_params": model.count_parameters(),
@@ -875,14 +789,12 @@ def main():
             "total_steps": len(train_loader) * args.epochs,
         }, allow_val_change=True)
 
-    # Optimizer and scheduler
     optimizer = AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
 
-    # Scheduler counts optimizer steps (not micro-batches)
     steps_per_epoch = len(train_loader) // args.grad_accum_steps
     total_steps = steps_per_epoch * args.epochs
     warmup_scheduler = LinearLR(
@@ -897,7 +809,6 @@ def main():
         milestones=[args.warmup_steps],
     )
 
-    # Initialize EMA shadow parameters
     ema_params = None
     if args.ema_decay > 0:
         ema_params = {
@@ -907,7 +818,6 @@ def main():
         }
         print(f"EMA initialized with decay={args.ema_decay}")
 
-    # Resume if specified
     start_epoch = 0
     best_val_metric = 0.0
     if args.resume:
@@ -929,12 +839,10 @@ def main():
             best_val_metric = loaded_metrics.get("mcq_accuracy", 0.0)
         print(f"Resumed from epoch {start_epoch}, best metric: {best_val_metric:.4f}")
 
-    # Sanity check: verify score_contrastive matches score_pairwise
     if args.loss_type != "mcq":
         print("\nRunning sanity check (score_contrastive vs score_pairwise)...")
         sanity_check_contrastive(model, train_loader, device)
 
-    # Training loop
     history = {"train": [], "val": [], "best_epoch": -1, "best_val_metric": 0.0}
     global_step = 0
     epochs_without_improvement = 0
@@ -945,7 +853,6 @@ def main():
         print(f"Epoch {epoch + 1}/{args.epochs}")
         print("=" * 60)
 
-        # Train
         train_metrics = train_epoch(
             model=model,
             loss_fn=loss_fn,
@@ -968,7 +875,6 @@ def main():
         )
         global_step = train_metrics.pop("global_step", global_step)
 
-        # Print train metrics
         print(f"\nTrain: loss={train_metrics['loss_total']:.4f}")
         if "mcq_accuracy" in train_metrics:
             print(f"  mcq_acc={train_metrics['mcq_accuracy']:.4f}, "
@@ -992,10 +898,8 @@ def main():
 
         history["train"].append(train_metrics)
 
-        # Validate (using EMA weights if available)
         val_metrics = None
         if val_loader is not None:
-            # Swap in EMA weights for evaluation
             original_params = None
             if ema_params is not None:
                 original_params = {}
@@ -1027,10 +931,9 @@ def main():
 
             history["val"].append(val_metrics)
 
-            # Best-model selection depends on loss_type
             if args.loss_type == "mcq" or args.loss_type == "combined":
                 current_metric = val_metrics["mcq_accuracy"]
-            else:  # contrastive
+            else:
                 current_metric = (
                     val_metrics["contrastive_acc_i2t"]
                     + val_metrics["contrastive_acc_t2i"]
@@ -1042,7 +945,6 @@ def main():
                 history["best_val_metric"] = best_val_metric
                 epochs_without_improvement = 0
 
-                # Save best model (still has EMA weights loaded)
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, val_metrics,
                     str(checkpoint_dir / "best_model.pt"), config,
@@ -1052,13 +954,11 @@ def main():
             else:
                 epochs_without_improvement += 1
 
-            # Restore original (non-EMA) weights for continued training
             if original_params is not None:
                 for name, param in model.named_parameters():
                     if name in original_params:
                         param.data.copy_(original_params[name])
 
-        # W&B epoch logging
         if use_wandb_logging:
             log_dict = {"epoch": epoch + 1}
             for k, v in train_metrics.items():
@@ -1069,7 +969,6 @@ def main():
                 log_dict["best_val_metric"] = best_val_metric
             wandb.log(log_dict, step=global_step)
 
-        # Periodic checkpoint
         if (epoch + 1) % args.save_every == 0:
             save_checkpoint(
                 model, optimizer, scheduler, epoch,
@@ -1079,7 +978,6 @@ def main():
                 ema_params=ema_params,
             )
 
-        # Early stopping
         if (
             args.early_stopping_patience > 0
             and val_loader is not None
@@ -1091,11 +989,9 @@ def main():
             )
             break
 
-    # Save history
     with open(exp_dir / "history.json", "w") as f:
         json.dump(history, f, indent=2)
 
-    # Final summary
     print("\n" + "=" * 60)
     print("Training Complete!")
     print("=" * 60)

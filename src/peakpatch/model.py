@@ -1,29 +1,4 @@
-"""Models for CLIP negation correction.
-
-ScoreCorrector: Score-level correction for MCQ tasks.
-EmbeddingCorrector: Token-level embedding correction for retrieval tasks.
-
-ScoreCorrector formula:
-    final_score(image, text) = cosine_sim(image_L12, text_L12) + correction
-
-Where correction = tanh(network_output) * max_correction, ensuring the
-correction is bounded and preserves retrieval performance.
-
-Input features per (image, text) pair:
-- sim_3:     cosine(text_L3,  image_L12)  -- early layer similarity
-- sim_8:     cosine(text_L8,  image_L12)  -- mid layer similarity
-- sim_12:    cosine(text_L12, image_L12)  -- CLIP baseline score
-- text_ctx:  MLP(concat(text_L3, text_L8, text_L12)) -- negation detector
-- cross_ctx: MLP(text_L12 * image_L12) -- alignment detector
-
-EmbeddingCorrector formula:
-    correction = MLP([CLS12, learned_query_attn(H12), CLS10, pool(H12)])
-    corrected_emb = normalize(text_L12 + alpha * correction)
-
-Uses a learned query token to discover negation-relevant positions via
-cross-attention over the full token sequence (no explicit negator mask).
-
-"""
+"""Models for CLIP negation correction."""
 
 from typing import Dict, List, Optional, Tuple
 
@@ -33,12 +8,7 @@ import torch.nn.functional as F
 
 
 class ScoreCorrector(nn.Module):
-    """Learned score-level corrector for CLIP cosine similarity.
-
-    Computes a bounded correction to add to CLIP's cosine similarity,
-    using multi-layer text features and cross-modal context to detect
-    when negation adjustments are needed.
-    """
+    """Learned score-level corrector for CLIP cosine similarity."""
 
     VALID_MODES = ("fixed", "margin_relative", "cross_gate", "multiplicative", "two_head", "embedding")
 
@@ -59,33 +29,6 @@ class ScoreCorrector(nn.Module):
         use_token_features: bool = False,
         token_num_heads: int = 8,
     ):
-        """Initialize the ScoreCorrector.
-
-        Args:
-            embed_dim: CLIP embedding dimension (512 for ViT-B/32)
-            context_dim: Dimension of context vectors (text_ctx, cross_ctx)
-            max_correction: Maximum absolute correction magnitude
-            dropout: Dropout probability in correction head
-            selected_layers: Which CLIP layers to use (default: [3, 8, 12])
-            use_gate: If True, add a negation gate that suppresses corrections
-                on non-negation text. Gate is predicted from text_ctx only.
-            correction_mode: How corrections are applied. One of:
-                - "fixed": tanh(raw) * max_correction (default, original behavior)
-                - "margin_relative": scale correction by local cross-layer spread
-                - "cross_gate": pair-specific gate from (text_ctx, cross_ctx)
-                - "multiplicative": multiply baseline sim by (1 + alpha*tanh(raw))
-                - "two_head": separate negation detector and grounding detector
-                - "embedding": learn text embedding residual instead of score correction
-            margin_alpha: fraction of spread allowed as correction (margin_relative)
-            mult_alpha: max multiplicative deviation from 1.0 (multiplicative)
-            confidence_gate: If True, scale corrections by inverse CLIP confidence.
-            confidence_rho: Exponent controlling confidence gating sharpness.
-            embed_alpha: Maximum L2 norm of embedding delta (embedding mode).
-            use_token_features: If True, add learned query cross-attention over
-                token sequences. For ablation: tests whether token-level features
-                help score correction.
-            token_num_heads: Number of attention heads for token cross-attention.
-        """
         super().__init__()
 
         if selected_layers is None:
@@ -111,7 +54,6 @@ class ScoreCorrector(nn.Module):
         self.use_token_features = use_token_features
         self.token_num_heads = token_num_heads
 
-        # Embedding mode: learn a text embedding residual instead of score correction
         if correction_mode == "embedding":
             if use_gate:
                 import warnings
@@ -130,7 +72,6 @@ class ScoreCorrector(nn.Module):
             self._init_weights()
             return
 
-        # cross_gate mode uses its own pair-specific gate; disable text-only gate
         if correction_mode == "cross_gate" and use_gate:
             import warnings
             warnings.warn(
@@ -139,7 +80,6 @@ class ScoreCorrector(nn.Module):
             use_gate = False
         self.use_gate = use_gate
 
-        # text_encoder: concat(text_L3, text_L8, text_L12) -> text_ctx
         self.text_encoder = nn.Sequential(
             nn.Linear(self.num_layers * embed_dim, 256),
             nn.LayerNorm(256),
@@ -147,7 +87,6 @@ class ScoreCorrector(nn.Module):
             nn.Linear(256, context_dim),
         )
 
-        # cross_encoder: text_L12 * image_L12 (elementwise) -> cross_ctx
         self.cross_encoder = nn.Sequential(
             nn.Linear(embed_dim, 256),
             nn.LayerNorm(256),
@@ -155,7 +94,6 @@ class ScoreCorrector(nn.Module):
             nn.Linear(256, context_dim),
         )
 
-        # Token feature modules (ablation: add token-level info to SC)
         if use_token_features:
             self.token_query = nn.Parameter(
                 torch.randn(1, 1, embed_dim) * 0.02)
@@ -172,8 +110,7 @@ class ScoreCorrector(nn.Module):
                 nn.GELU(),
             )
 
-        # Mode-specific heads
-        n_ctx = 3 if use_token_features else 2  # text + cross + token
+        n_ctx = 3 if use_token_features else 2
         if correction_mode == "two_head":
             self.negation_head = nn.Linear(context_dim, 1)
             self.grounding_head = nn.Linear(context_dim, 1)
@@ -195,11 +132,7 @@ class ScoreCorrector(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize weights for stable training.
-
-        The final layer is initialized near-zero so that corrections
-        start approximately zero, preserving CLIP baseline at init.
-        """
+        """Initialize weights for stable training."""
         if hasattr(self, "embedding_corrector"):
             for m in self.embedding_corrector:
                 if isinstance(m, nn.Linear):
@@ -255,18 +188,10 @@ class ScoreCorrector(nn.Module):
         token_sequences: torch.Tensor,
         padding_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute token context via learned query cross-attention.
-
-        Args:
-            token_sequences: [B, S, D] token hidden states
-            padding_mask: [B, S] bool, True = valid token
-
-        Returns:
-            token_ctx: [B, context_dim]
-        """
+        """Compute token context via learned query cross-attention."""
         B = token_sequences.shape[0]
-        query = self.token_query.expand(B, -1, -1)  # [B, 1, D]
-        key_padding_mask = ~padding_mask  # MHA: True = IGNORE
+        query = self.token_query.expand(B, -1, -1)
+        key_padding_mask = ~padding_mask
 
         attn_out, _ = self.token_attn(
             query=query,
@@ -274,21 +199,14 @@ class ScoreCorrector(nn.Module):
             value=token_sequences,
             key_padding_mask=key_padding_mask,
         )
-        summary = self.token_attn_ln(attn_out.squeeze(1))  # [B, D]
-        return self.token_proj(summary)  # [B, context_dim]
+        summary = self.token_attn_ln(attn_out.squeeze(1))
+        return self.token_proj(summary)
 
     def _compute_text_ctx(
         self,
         text_layers: Dict[int, torch.Tensor],
     ) -> torch.Tensor:
-        """Compute text context vector from multi-layer features.
-
-        Args:
-            text_layers: {layer_idx: tensor [..., D]} text features per layer
-
-        Returns:
-            text_ctx [..., context_dim]
-        """
+        """Compute text context vector from multi-layer features."""
         layer_feats = [text_layers[layer] for layer in self.selected_layers]
         concat = torch.cat(layer_feats, dim=-1)
         return self.text_encoder(concat)
@@ -298,15 +216,7 @@ class ScoreCorrector(nn.Module):
         text_L12: torch.Tensor,
         image_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute cross-modal context from elementwise product.
-
-        Args:
-            text_L12: [..., D] text L12 features
-            image_emb: [..., D] image features
-
-        Returns:
-            cross_ctx [..., context_dim]
-        """
+        """Compute cross-modal context from elementwise product."""
         cross = text_L12 * image_emb
         return self.cross_encoder(cross)
 
@@ -315,15 +225,7 @@ class ScoreCorrector(nn.Module):
         text_layers: Dict[int, torch.Tensor],
         image_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute cosine similarities for each layer.
-
-        Args:
-            text_layers: {layer_idx: tensor [..., D]}
-            image_emb: [..., D]
-
-        Returns:
-            sims [..., num_layers]
-        """
+        """Compute cosine similarities for each layer."""
         sims = []
         for layer in self.selected_layers:
             sim = (text_layers[layer] * image_emb).sum(dim=-1, keepdim=True)
@@ -334,15 +236,7 @@ class ScoreCorrector(nn.Module):
         self,
         baseline_sim: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute kurtosis-based confidence from baseline similarities.
-
-        Args:
-            baseline_sim: [..., N] similarities where last dim is the
-                distribution over texts/classes
-
-        Returns:
-            kappa: [..., 1] confidence scaling factor.
-        """
+        """Compute kurtosis-based confidence from baseline similarities."""
         mu = baseline_sim.mean(dim=-1, keepdim=True)
         sigma = baseline_sim.std(dim=-1, keepdim=True).clamp(min=1e-6)
         standardized = (baseline_sim - mu) / sigma
@@ -359,21 +253,7 @@ class ScoreCorrector(nn.Module):
         precomputed_kappa: Optional[torch.Tensor] = None,
         token_ctx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute final scores by applying mode-specific correction.
-
-        Args:
-            baseline_sim: [...] CLIP L12 cosine similarity (no trailing dim)
-            sims: [..., num_layers] per-layer cosine similarities
-            text_ctx: [..., context_dim]
-            cross_ctx: [..., context_dim]
-            precomputed_kappa: Optional [..., 1] precomputed confidence kappa
-            token_ctx: Optional [..., context_dim] token-level context
-
-        Returns:
-            Tuple of:
-                final_scores: [...] corrected scores
-                corrections: [...] correction values (for regularization)
-        """
+        """Compute final scores by applying mode-specific correction."""
         mode = self.correction_mode
 
         if mode == "two_head":
@@ -419,14 +299,7 @@ class ScoreCorrector(nn.Module):
         self,
         text_layers: Dict[int, torch.Tensor],
     ) -> torch.Tensor:
-        """Compute bounded text embedding residual from multi-layer features.
-
-        Args:
-            text_layers: {layer_idx: tensor [..., D]} text features per layer
-
-        Returns:
-            delta: [..., D] embedding residual with ||delta|| <= embed_alpha
-        """
+        """Compute bounded text embedding residual from multi-layer features."""
         layer_feats = [text_layers[layer] for layer in self.selected_layers]
         concat = torch.cat(layer_feats, dim=-1)
         raw = self.embedding_corrector(concat)
@@ -441,21 +314,7 @@ class ScoreCorrector(nn.Module):
         token_sequences: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute corrected score for (image, text) pairs.
-
-        Args:
-            text_layers: {layer_idx: tensor [B, D]} text features per layer
-            image_emb: [B, D] image embeddings (L12, normalized)
-            token_sequences: Optional [B, S, D] token hidden states
-                (required when use_token_features=True)
-            padding_mask: Optional [B, S] bool mask
-                (required when use_token_features=True)
-
-        Returns:
-            Tuple of:
-                corrected_score: [B] final scores
-                correction: [B] correction values (for regularization)
-        """
+        """Compute corrected score for (image, text) pairs."""
         anchor_layer = max(self.selected_layers)
         text_L12 = text_layers[anchor_layer]
 
@@ -488,19 +347,7 @@ class ScoreCorrector(nn.Module):
         mcq_token_seqs: Optional[torch.Tensor] = None,
         mcq_padding_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Score MCQ options (4 options per sample).
-
-        Args:
-            mcq_layers: {layer_idx: tensor [B, 4, D]} MCQ option features
-            image_emb: [B, D] image embeddings
-            mcq_token_seqs: Optional [B, 4, S, D] token hidden states per option
-            mcq_padding_masks: Optional [B, 4, S] padding masks per option
-
-        Returns:
-            Tuple of:
-                corrected_scores: [B, 4] scores for each option
-                corrections: [B, 4] correction values
-        """
+        """Score MCQ options (4 options per sample)."""
         num_options = mcq_layers[self.selected_layers[0]].shape[1]
 
         all_scores = []
@@ -530,17 +377,7 @@ class ScoreCorrector(nn.Module):
         text_layers: Dict[int, torch.Tensor],
         image_emb: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute full B x B corrected score matrix for contrastive training.
-
-        Args:
-            text_layers: {layer_idx: tensor [B, D]} text features per layer
-            image_emb: [B, D] image embeddings (L12, normalized)
-
-        Returns:
-            Tuple of:
-                scores: [B, B] corrected similarity matrix
-                corrections: [B, B] correction values
-        """
+        """Compute full B x B corrected score matrix for contrastive training."""
         anchor_layer = max(self.selected_layers)
         text_L12 = text_layers[anchor_layer]
 
@@ -577,16 +414,7 @@ class ScoreCorrector(nn.Module):
         image_embs: torch.Tensor,
         batch_size: int = 256,
     ) -> torch.Tensor:
-        """Compute pairwise score matrix for retrieval.
-
-        Args:
-            text_layers: {layer_idx: tensor [N_text, D]} all text features
-            image_embs: [N_img, D] all image embeddings
-            batch_size: Number of image-text pairs to process at once
-
-        Returns:
-            scores: [N_img, N_text] corrected similarity matrix
-        """
+        """Compute pairwise score matrix for retrieval."""
         N_img = image_embs.shape[0]
         N_text = text_layers[self.selected_layers[0]].shape[0]
         device = image_embs.device
@@ -682,15 +510,7 @@ class ScoreCorrector(nn.Module):
         checkpoint_path: str,
         device: str = "cuda",
     ) -> "ScoreCorrector":
-        """Load a ScoreCorrector from a training checkpoint.
-
-        Args:
-            checkpoint_path: Path to checkpoint .pt file
-            device: Device to load model onto
-
-        Returns:
-            Loaded ScoreCorrector model
-        """
+        """Load a ScoreCorrector from a training checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         config = checkpoint.get("config", {})
 
@@ -717,20 +537,7 @@ class ScoreCorrector(nn.Module):
 
 
 class EmbeddingCorrector(nn.Module):
-    """Token-aware deviation predictor with learned query (no negation detector).
-
-    Instead of requiring explicit negator positions, uses a learned query
-    token that discovers negation-relevant positions via cross-attention.
-    This handles all negation patterns: explicit ("no", "without"),
-    morphological ("un-happy"), lexical ("lacks", "absent"), and implicit
-    ("failed to", "nowhere to be seen").
-
-    Architecture:
-        1. Learned query [1, D] attends to full H12 sequence (no causal mask)
-           -> attention_summary [B, D]
-        2. Mean-pool H12 over valid tokens -> pooled [B, D]
-        3. MLP([CLS12, attention_summary, CLS10, pooled_H12]) -> deviation [B, D]
-    """
+    """Token-aware deviation predictor with learned query (no negation detector)."""
 
     def __init__(
         self,
@@ -742,19 +549,6 @@ class EmbeddingCorrector(nn.Module):
         cls_only: bool = False,
         no_pool: bool = False,
     ):
-        """Initialize EmbeddingCorrector.
-
-        Args:
-            embed_dim: CLIP embedding dimension (512 for ViT-B/32)
-            hidden_dim: MLP hidden dimension
-            num_heads: Number of attention heads in cross-attention
-            dropout: Dropout probability
-            no_anchor: If True, skip anchor CLS from input (3*D instead of 4*D)
-            cls_only: If True, skip cross-attention and pooling, use only
-                CLS tokens as input. For ablation: tests whether token-level
-                features matter for embedding correction.
-            no_pool: If True, drop mean-pooled embedding from MLP input.
-        """
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -766,10 +560,8 @@ class EmbeddingCorrector(nn.Module):
         self.no_pool = no_pool
 
         if not cls_only:
-            # Learned query token that discovers negation-relevant positions
             self.learned_query = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
 
-            # Cross-attention: learned query attends to full sequence
             self.cross_attn = nn.MultiheadAttention(
                 embed_dim=embed_dim,
                 num_heads=num_heads,
@@ -778,13 +570,10 @@ class EmbeddingCorrector(nn.Module):
             )
             self.attn_ln = nn.LayerNorm(embed_dim)
 
-        # MLP input dimension depends on mode
         if cls_only:
-            # CLS-only: [CLS_target, CLS_anchor] or [CLS_target]
             mlp_input_dim = embed_dim if no_anchor else 2 * embed_dim
         else:
-            # Count components: CLS_target + attn_summary + (CLS_anchor?) + (pooled?)
-            n_components = 2  # CLS_target + attn_summary always present
+            n_components = 2
             if not no_anchor:
                 n_components += 1
             if not no_pool:
@@ -802,7 +591,6 @@ class EmbeddingCorrector(nn.Module):
             nn.Linear(hidden_dim, embed_dim),
         )
 
-        # Learned scaling factor (initialized to ~0.5)
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.5)))
 
         self._init_weights()
@@ -847,20 +635,10 @@ class EmbeddingCorrector(nn.Module):
         H_target: torch.Tensor,
         padding_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict deviation vector using token-level features.
-
-        Args:
-            H_anchor: [B, 77, D] anchor layer hidden states (ignored if no_anchor)
-            H_target: [B, 77, D] target layer hidden states (ln_final applied)
-            padding_mask: [B, 77] bool, True = valid token
-
-        Returns:
-            deviation: [B, D] predicted deviation vector
-        """
+        """Predict deviation vector using token-level features."""
         cls_target = self._get_cls_token(H_target, padding_mask)
 
         if self.cls_only:
-            # CLS-only ablation: no cross-attention, no pooling
             if self.no_anchor:
                 features = cls_target
             else:
@@ -870,9 +648,8 @@ class EmbeddingCorrector(nn.Module):
 
         B = H_target.shape[0]
 
-        # 1. Learned query attends to full target sequence
-        query = self.learned_query.expand(B, -1, -1)  # [B, 1, D]
-        key_padding_mask = ~padding_mask  # MHA convention: True = IGNORE
+        query = self.learned_query.expand(B, -1, -1)
+        key_padding_mask = ~padding_mask
 
         attn_out, _ = self.cross_attn(
             query=query,
@@ -880,9 +657,8 @@ class EmbeddingCorrector(nn.Module):
             value=H_target,
             key_padding_mask=key_padding_mask,
         )
-        attn_summary = self.attn_ln(attn_out.squeeze(1))  # [B, D]
+        attn_summary = self.attn_ln(attn_out.squeeze(1))
 
-        # 2. Concatenate and predict
         parts = [cls_target, attn_summary]
         if not self.no_anchor:
             cls_anchor = self._get_cls_token(H_anchor, padding_mask)
@@ -901,20 +677,7 @@ class EmbeddingCorrector(nn.Module):
         padding_mask: torch.Tensor,
         alpha: float = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply correction to a text embedding.
-
-        Args:
-            text_cls: [B, D] L12 text embedding (normalized, projected)
-            H_anchor: [B, 77, D] anchor layer hidden states
-            H_target: [B, 77, D] target layer hidden states
-            padding_mask: [B, 77] bool
-            alpha: Override for learned alpha. If None, uses learned value.
-
-        Returns:
-            Tuple of:
-                corrected: [B, D] corrected embedding (normalized)
-                correction: [B, D] raw correction vector
-        """
+        """Apply correction to a text embedding."""
         correction = self.forward(H_anchor, H_target, padding_mask)
         if alpha is None:
             alpha = torch.exp(self.log_alpha)
@@ -949,8 +712,8 @@ class EmbeddingCorrector(nn.Module):
         """Load an EmbeddingCorrector from a training checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         config = checkpoint.get("config", {})
-        # Backward compat: old checkpoints store "token_aware_dp_v2"
         model_type = config.get("model_type", "embedding_corrector")
+        # Older checkpoints store the model_type under its former name.
         if model_type == "token_aware_dp_v2":
             config["model_type"] = "embedding_corrector"
 

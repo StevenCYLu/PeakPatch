@@ -1,30 +1,4 @@
-"""Reproduce the PeakPatch MCQ results on NegBench (COCO and VOC2007).
-
-PeakPatch runs on a frozen CLIP ViT-B/32 backbone. The ECN rewrites the final
-text embedding from intermediate-layer token states; the SCN then scores the
-four options using per-layer [EOS] features, with the ECN-corrected embedding
-substituted for the last layer ("chained" scoring, exactly as in the paper).
-
-Reproducing Table 1 (the shipped checkpoints):
-
-    python scripts/eval_mcq.py --tasks coco voc \
-        --negbench-csv-dir /path/to/NegBench/evaluation_data/images \
-        --coco-image-root /path/to/coco_root \
-        --voc-image-root /path/to/voc_root
-
-    -> COCO 74.33, VOC 65.47
-
-The frozen-CLIP baseline row:
-
-    python scripts/eval_mcq.py --model clip --tasks coco voc ...
-
-    -> COCO 39.30, VOC 38.72
-
-Image roots are the directory each CSV's relative ``image_path`` resolves
-against: ``<coco-image-root>/data/coco/images/val2017/...`` and
-``<voc-image-root>/data/voc2007/VOCdevkit/VOC2007/JPEGImages/...``.
-See README.md for how to lay these out.
-"""
+"""Reproduce the PeakPatch MCQ results on NegBench (COCO and VOC2007)."""
 
 import argparse
 import json
@@ -43,11 +17,8 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-# open_clip download cache. None lets open_clip use its own default location.
 CLIP_CACHE_DIR = os.environ.get("CLIP_CACHE_DIR") or None
 
-# JPEG decode dominates wall-clock and leaves the GPU idle between batches, so
-# each batch is decoded across a thread pool. Set --num-workers 1 to serialise.
 IMAGE_WORKERS = 8
 _IMAGE_POOL = None
 
@@ -61,18 +32,7 @@ DEFAULT_SCN = REPO_ROOT / "checkpoints" / "peakpatch_scn.pt"
 
 
 def load_clip_model(device, clip_arch=None, clip_pretrained=None, clip_checkpoint=None):
-    """Load a CLIP backbone, optionally overriding it with fine-tuned weights.
-
-    Args:
-        device: torch device.
-        clip_arch: open_clip architecture name (default ViT-B-32-quickgelu).
-        clip_pretrained: pretrained tag (default openai).
-        clip_checkpoint: optional path to a fine-tuned ViT-B/32 state dict
-            (NegCLIP, CoN-CLIP, ...). Loaded non-strictly over the base model.
-
-    Returns:
-        (model, preprocess, tokenizer)
-    """
+    """Load a CLIP backbone, optionally overriding it with fine-tuned weights."""
     arch = clip_arch or "ViT-B-32-quickgelu"
     pretrained = clip_pretrained or "openai"
     print(f"  Architecture: {arch}, pretrained: {pretrained}")
@@ -93,22 +53,7 @@ def load_clip_model(device, clip_arch=None, clip_pretrained=None, clip_checkpoin
 
 
 def extract_sc_features(tokens, clip_model, layers):
-    """Extract per-layer CLS-projected features for ScoreCorrector.
-
-    For each requested layer, extracts the EOS token hidden state, applies
-    ln_final and text_projection, then normalizes. This matches the
-    pre-extraction pipeline in scripts/extract_features.py.
-
-    Supports both standard CLIP and CustomTextCLIP (SigLIP).
-
-    Args:
-        tokens: [B, S] tokenized text (on device)
-        clip_model: CLIP model
-        layers: list of layer indices (1-indexed, e.g. [3, 8, 12])
-
-    Returns:
-        Dict[int, Tensor]: {layer_idx: [B, D]} normalized CLS-projected features
-    """
+    """Extract per-layer CLS-projected features for ScoreCorrector."""
     from peakpatch.clip_utils import (
         _get_text_encoder,
         _apply_text_projection,
@@ -140,20 +85,7 @@ def extract_sc_features(tokens, clip_model, layers):
 
 
 def build_peakpatch_system(ec_checkpoint, sc_checkpoint, device):
-    """Load the frozen CLIP backbone together with the ECN and SCN modules.
-
-    The backbone architecture is read from the ECN checkpoint config, so the
-    modules are always paired with the encoder they were trained against.
-
-    Args:
-        ec_checkpoint: path to the ECN weights.
-        sc_checkpoint: path to the SCN weights.
-        device: torch device.
-
-    Returns:
-        (system, preprocess, tokenizer), where system is the tuple consumed by
-        ``eval_mcq``: (clip_model, sc_model, ec_model, ec_config, ec_alpha, sc_layers).
-    """
+    """Load the frozen CLIP backbone together with the ECN and SCN modules."""
     from peakpatch.model import EmbeddingCorrector, ScoreCorrector
 
     checkpoint = torch.load(ec_checkpoint, map_location="cpu", weights_only=False)
@@ -191,11 +123,7 @@ def _preprocess_one(args):
 
 
 def load_image_batch(paths, preprocess):
-    """Decode and preprocess a batch of images, preserving input order.
-
-    Uses ThreadPoolExecutor.map, which yields results in argument order, so the
-    stacked batch is identical to decoding serially.
-    """
+    """Decode and preprocess a batch of images, preserving input order."""
     if IMAGE_WORKERS <= 1:
         return [_preprocess_one((p, preprocess)) for p in paths]
 
@@ -207,23 +135,7 @@ def load_image_batch(paths, preprocess):
 
 def eval_mcq(model, preprocess, tokenizer, csv_path, image_root, device,
              peakpatch_system=None, batch_size=64):
-    """Score a NegBench MCQ CSV and return accuracy broken down by answer type.
-
-    Args:
-        model: CLIP backbone, used directly when peakpatch_system is None.
-        preprocess: CLIP image transform.
-        tokenizer: CLIP tokenizer.
-        csv_path: NegBench MCQ CSV (image_path, caption_0..3, correct_answer,
-            correct_answer_template).
-        image_root: directory the CSV's relative image_path entries resolve against.
-        device: torch device.
-        peakpatch_system: if given, the tuple built by ``build_peakpatch_system``;
-            otherwise the frozen CLIP backbone is scored on its own.
-        batch_size: questions per batch.
-
-    Returns:
-        dict of total/positive/negative/hybrid accuracy plus question counts.
-    """
+    """Score a NegBench MCQ CSV and return accuracy broken down by answer type."""
     print(f"\n--- MCQ Evaluation: {csv_path.name} ---")
     df = pd.read_csv(csv_path)
     n = len(df)
@@ -233,20 +145,16 @@ def eval_mcq(model, preprocess, tokenizer, csv_path, image_root, device,
     total_by_type = {"positive": 0, "negative": 0, "hybrid": 0}
     total_correct = 0
 
-    # Process in batches
     for start in tqdm(range(0, n, batch_size), desc="MCQ"):
         end = min(start + batch_size, n)
         batch_df = df.iloc[start:end]
         bs = len(batch_df)
 
-        # Load images
         images = load_image_batch(
             [image_root / p for p in batch_df["image_path"]], preprocess)
 
         image_batch = torch.stack(images).to(device)
 
-        # Get captions (4 per image) - collect all caption_0 first, then
-        # all caption_1, etc. (matches NegBench ordering for correct reshape)
         all_captions = []
         for i in range(4):
             for _, row in batch_df.iterrows():
@@ -267,14 +175,12 @@ def eval_mcq(model, preprocess, tokenizer, csv_path, image_root, device,
                 image_features = F.normalize(
                     clip_model.encode_image(image_batch).float(), dim=-1)
 
-                # Per-layer [EOS] features the SCN scores from: [4*bs, D] -> [bs, 4, D].
                 sc_feats = extract_sc_features(tokens, clip_model, sc_layers)
                 sc_mcq = {
                     layer: sc_feats[layer].view(4, bs, -1).permute(1, 0, 2)
                     for layer in sc_layers
                 }
 
-                # ECN: rewrite the final text embedding from peak-layer token states.
                 text_cls = clip_model.encode_text(tokens)
                 text_cls = F.normalize(text_cls.float(), dim=-1)
 
@@ -290,14 +196,11 @@ def eval_mcq(model, preprocess, tokenizer, csv_path, image_root, device,
                     text_cls, H_anchor, H_target, padding_mask, alpha=ec_alpha)
                 ec_corrected = ec_corrected.view(4, bs, -1).permute(1, 0, 2)
 
-                # Chained scoring: the SCN reads the ECN-corrected embedding in
-                # place of the backbone's final layer.
                 sc_mcq[max(sc_layers)] = ec_corrected
                 logits, _ = sc_model.score_mcq(sc_mcq, image_features)
             else:
                 image_features = F.normalize(model.encode_image(image_batch), dim=-1)
                 text_features = F.normalize(model.encode_text(tokens), dim=-1)
-                # [4*bs, D] -> [4, bs, D], then [bs, D] x [4, bs, D] -> [bs, 4]
                 text_features = text_features.view(4, bs, -1)
                 logits = torch.einsum("bf,nbf->bn", image_features, text_features)
 

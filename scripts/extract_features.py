@@ -1,28 +1,4 @@
-"""Feature extraction utilities for CLIP intermediate layers.
-
-This module provides functions to extract EOS token features from
-CLIP's transformer layers, which are then saved for efficient training.
-
-Supports optional EC (EmbeddingCorrector) chaining: when --ec-checkpoint is
-provided, the frozen EC corrects the L12 text embedding before saving,
-so SC can train on EC-corrected features.
-
-Usage:
-    # Standard extraction
-    uv run python scripts/extract_features.py \
-        --input-csv /path/to/data.csv \
-        --image-root /path/to/images \
-        --output-dir /path/to/output \
-        --layers 6 8 12
-
-    # EC-chained extraction (corrected L12)
-    uv run python scripts/extract_features.py \
-        --input-csv /path/to/data.csv \
-        --image-root /path/to/images \
-        --output-dir /path/to/output \
-        --layers 6 8 12 \
-        --ec-checkpoint results/embedding_corrector/layers_t8_a6/checkpoints/best_model.pt
-"""
+"""Feature extraction utilities for CLIP intermediate layers."""
 
 import argparse
 import json
@@ -37,7 +13,6 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-# Model cache directory (configurable via env var)
 CLIP_CACHE_DIR = os.environ.get("CLIP_CACHE_DIR") or None
 
 
@@ -48,21 +23,7 @@ def extract_layer_features(
     layers: List[int] = None,
     device: str = "cuda",
 ) -> Dict[int, torch.Tensor]:
-    """Extract intermediate layer features from CLIP text encoder.
-
-    Supports both standard CLIP and CustomTextCLIP (SigLIP) architectures
-    via clip_utils abstractions.
-
-    Args:
-        texts: List of text strings
-        model: CLIP model
-        tokenizer: CLIP tokenizer
-        layers: Which layers to extract (1-indexed)
-        device: Device for computation
-
-    Returns:
-        Dict mapping layer_idx -> features [B, D]
-    """
+    """Extract intermediate layer features from CLIP text encoder."""
     from peakpatch.clip_utils import (
         _get_text_encoder, _apply_text_projection, get_eos_positions,
     )
@@ -111,30 +72,7 @@ def extract_layer_features_ec_corrected(
     ec_alpha: float = None,
     device: str = "cuda",
 ) -> Dict[int, torch.Tensor]:
-    """Extract features with EC-corrected L12 in a single forward pass.
-
-    SC layers (e.g. 6, 8) get standard CLS extraction (EOS -> ln_final ->
-    text_projection -> normalize). EC anchor/target layers also get full
-    token sequences (ln_final only, no projection) for the EC model.
-    The final layer CLS feeds into EC, which produces the corrected output.
-
-    Supports both standard CLIP and CustomTextCLIP (SigLIP) architectures.
-
-    Args:
-        texts: List of text strings
-        model: CLIP model
-        tokenizer: CLIP tokenizer
-        ec_model: Frozen EmbeddingCorrector
-        layers: SC layers to extract (e.g. [6, 8, 12])
-        ec_target_layer: EC target layer (default 8)
-        ec_anchor_layer: EC anchor layer (default 6)
-        ec_alpha: Override EC alpha (None = use learned)
-        device: Device for computation
-
-    Returns:
-        Dict mapping layer_idx -> features [B, D], with the final layer
-        replaced by EC-corrected embedding.
-    """
+    """Extract features with EC-corrected L12 in a single forward pass."""
     from peakpatch.clip_utils import (
         _get_text_encoder, _apply_text_projection, get_eos_positions,
         compute_padding_mask,
@@ -171,21 +109,18 @@ def extract_layer_features_ec_corrected(
                     break
                 continue
 
-            # CLS extraction for SC layers and final layer
             if current_layer in layers or current_layer == final_layer:
                 eos_features = x[batch_idx, eos_pos]
                 eos_normed = text_enc.ln_final(eos_features)
                 eos_projected = _apply_text_projection(text_enc, eos_normed)
                 cls_features[current_layer] = F.normalize(eos_projected.float(), dim=-1)
 
-            # Full token sequences for EC anchor/target
             if current_layer in ec_layers:
                 token_seqs[current_layer] = text_enc.ln_final(x).float()
 
             if current_layer >= max_layer:
                 break
 
-        # EC correction
         padding_mask = compute_padding_mask(tokens, model)
         text_cls = cls_features[final_layer]
         H_anchor = token_seqs[ec_anchor_layer]
@@ -194,7 +129,6 @@ def extract_layer_features_ec_corrected(
         corrected_final, _ = ec_model.correct_embedding(
             text_cls, H_anchor, H_target, padding_mask, alpha=ec_alpha)
 
-    # Build result: SC layers with EC-corrected final layer
     features = {}
     for layer in layers:
         if layer == final_layer:
@@ -204,7 +138,7 @@ def extract_layer_features_ec_corrected(
     return features
 
 
-SHARD_SIZE = 200  # Save a shard every N batches
+SHARD_SIZE = 200
 
 
 def _save_mcq_shard(shard_dir, shard_idx, buf, layers, save_token_ids):
@@ -282,29 +216,7 @@ def extract_dataset_features(
     ec_config: Optional[Dict] = None,
     save_token_ids: bool = False,
 ):
-    """Extract and save features for an entire dataset.
-
-    Uses shard-based checkpointing so partial progress survives timeouts.
-    On restart, existing shards are skipped automatically.
-
-    Args:
-        csv_path: Path to CSV with columns:
-            - image_path: relative path to image
-            - caption_0, caption_1, caption_2, caption_3: MCQ options
-            - correct_answer: correct option index (0-3)
-        image_root: Root directory for images
-        output_dir: Directory to save extracted features
-        model: CLIP model
-        tokenizer: CLIP tokenizer
-        preprocess: Image preprocessing transform
-        layers: Which layers to extract
-        device: Device for computation
-        batch_size: Batch size for extraction
-        num_workers: Number of data loading workers
-        ec_model: Optional frozen EmbeddingCorrector for L12 correction
-        ec_config: EC configuration dict with target_layer, anchor_layer, ec_alpha
-        save_token_ids: If True, tokenize MCQ options and save as mcq_token_ids.pt
-    """
+    """Extract and save features for an entire dataset."""
     if layers is None:
         layers = [3, 8, 12]
 
@@ -333,27 +245,22 @@ def extract_dataset_features(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if already complete
     if (output_dir / "metadata.json").exists():
         print(f"Already complete: {output_dir / 'metadata.json'} exists. Skipping.")
         return
 
-    # Shard directory for checkpointing
     shard_dir = output_dir / "_shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load data
     df = pd.read_csv(csv_path)
     print(f"Processing {len(df)} samples from {csv_path}")
 
-    # Find existing shards to resume from
     existing_shards = sorted(shard_dir.glob("shard_*.pt"))
     start_shard = len(existing_shards)
     start_batch = start_shard * SHARD_SIZE
     if start_shard > 0:
         print(f"  Resuming: found {start_shard} shards, skipping first {start_batch} batches")
 
-    # Initialize shard buffer
     def _new_buf():
         return {
             "image_emb": [],
@@ -367,7 +274,6 @@ def extract_dataset_features(
     shard_idx = start_shard
     batch_in_shard = 0
 
-    # Process in batches with prefetching: load next batch on CPU while GPU processes current
     def _load_image(args):
         idx, row = args
         image_path = Path(image_root) / row["image_path"]
@@ -394,17 +300,14 @@ def extract_dataset_features(
     io_pool = ThreadPoolExecutor(max_workers=num_workers)
     prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
-    # Prefetch first batch
     if active_batches:
         _, first_start = active_batches[0]
         first_end = min(first_start + batch_size, len(df))
         prefetch_future = prefetch_pool.submit(_load_batch, df.iloc[first_start:first_end])
 
     for idx, (batch_num, start_idx) in enumerate(tqdm(active_batches, desc="Extracting features")):
-        # Get prefetched result
         images, valid_indices = prefetch_future.result()
 
-        # Kick off prefetch for NEXT batch before doing GPU work
         if idx + 1 < len(active_batches):
             _, next_start = active_batches[idx + 1]
             next_end = min(next_start + batch_size, len(df))
@@ -422,12 +325,10 @@ def extract_dataset_features(
 
         images = torch.stack(images).to(device)
 
-        # Extract image embeddings
         with torch.no_grad(), torch.amp.autocast("cuda"):
             image_emb = model.encode_image(images, normalize=True)
         buf["image_emb"].append(image_emb.cpu())
 
-        # Extract text features for correct captions
         correct_captions = []
         for vi in valid_indices:
             row = df.loc[vi]
@@ -439,7 +340,6 @@ def extract_dataset_features(
         for layer in layers:
             buf["text_features"][layer].append(text_features[layer].cpu())
 
-        # Extract MCQ features (all 4 options) -- batched
         all_options = []
         for vi in valid_indices:
             row = df.loc[vi]
@@ -451,12 +351,10 @@ def extract_dataset_features(
             buf["mcq_features"][layer].append(
                 mcq_features[layer].cpu().reshape(n_valid, 4, -1))
 
-        # MCQ labels
         for vi in valid_indices:
             row = df.loc[vi]
             buf["mcq_labels"].append(int(row["correct_answer"]))
 
-        # MCQ token IDs
         if save_token_ids:
             mcq_captions = []
             for vi in valid_indices:
@@ -478,13 +376,11 @@ def extract_dataset_features(
     io_pool.shutdown()
     prefetch_pool.shutdown()
 
-    # Save remaining buffer as final shard
     if buf["image_emb"]:
         _save_mcq_shard(shard_dir, shard_idx, buf, layers, save_token_ids)
         print(f"  Saved shard {shard_idx}")
         shard_idx += 1
 
-    # Concatenate all shards into final files
     print("\nConcatenating shards into final files...")
     _concat_mcq_shards(
         shard_dir, output_dir, layers, save_token_ids, use_ec,
@@ -584,13 +480,11 @@ def main():
 
     args = parser.parse_args()
 
-    # Set device
     if args.device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
 
-    # Load CLIP model directly via open_clip
     import open_clip
 
     print(f"Loading CLIP model: {args.model} ({args.pretrained})")
@@ -601,7 +495,6 @@ def main():
     model = model.to(device).eval()
     tokenizer = open_clip.get_tokenizer(args.model)
 
-    # Load EC model if checkpoint provided
     ec_model = None
     ec_config = None
     if args.ec_checkpoint:
@@ -621,7 +514,6 @@ def main():
         print(f"  Target layer: {args.ec_target_layer}, Anchor layer: {args.ec_anchor_layer}")
         print(f"  Learned alpha: {learned_alpha:.4f}, effective: {effective:.4f}")
 
-    # Extract features
     extract_dataset_features(
         csv_path=args.input_csv,
         image_root=args.image_root,
