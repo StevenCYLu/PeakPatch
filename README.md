@@ -101,13 +101,25 @@ Any fine-tuned ViT-B/32 checkpoint (NegCLIP, CoN-CLIP, ...) can be scored the sa
 
 ## Training
 
-The released checkpoints were trained on CC12M-derived negation data built with the
-[NegBench](https://github.com/m1k2zoo/negbench) pipeline (`synthetic_datasets/finetuning/`):
+The released checkpoints were trained on CC12M-derived negation data in the
+[NegBench](https://github.com/m1k2zoo/negbench) CC12M-NegCap / CC12M-NegMCQ format:
 
-| CSV | Used for | Rows | Correct-answer templates |
+| File | Used for | Rows | Correct-answer templates |
 |---|---|--:|---|
-| `cc12m_negcap_500k.csv` | ECN (negated captions) | 1,176,307 | &mdash; |
-| `cc12m_negmcq_500k.csv` | SCN (4-way MCQ) | 391,823 | 130,766 hybrid, 130,590 negative, 110,706 positive, 19,761 modified positive |
+| `cc12m_negcap_500k.csv.gz` | ECN (negated captions) | 1,176,307 | &mdash; |
+| `cc12m_negmcq_500k.csv.gz` | SCN (4-way MCQ) | 391,823 | 130,766 hybrid, 130,590 negative, 110,706 positive, 19,761 modified positive |
+
+Both files are attached to the
+[`training-data` release](https://github.com/StevenCYLu/PeakPatch/releases/tag/training-data).
+Image paths are relative (`images/000000001.jpg`), so pass the directory holding `images/` as
+`--image-root`. The images themselves are not redistributed. Their IDs are keys from our own CC12M
+download, not row numbers of the public `cc12m.tsv`.
+
+```bash
+mkdir -p data/cc12m && cd data/cc12m
+gh release download training-data -R StevenCYLu/PeakPatch   # or download both files from the page
+cd ../..
+```
 
 The MCQ set matters most. Its correct answers are often negated, as in NegBench. An SCN trained
 only on questions whose correct answer is un-negated learns to reject every option that contains a
@@ -117,20 +129,20 @@ negation. It then scores below chance on NegBench (see the note at the end of th
 
 ```bash
 uv run scripts/split_mcq_csv.py \
-    --input-csv /path/to/cc12m_negmcq_500k.csv --output-dir data/mcq_split
+    --input-csv data/cc12m/cc12m_negmcq_500k.csv.gz --output-dir data/mcq_split
 # -> train.csv (313,458 rows), val.csv (78,365 rows)
 ```
 
 **2. Pre-extract frozen CLIP features.** Nothing in the backbone is trained, so its features are
 computed once and reused. Pass `--model ViT-B-32` explicitly &mdash; the extractors default to
-ViT-L/14. Both CSVs store absolute image paths, hence `--image-root /`:
+ViT-L/14:
 
 ```bash
 # negcap features for the ECN, split 90/10
 for split in train val; do
   uv run scripts/extract_negcap_features.py \
-      --input-csv /path/to/cc12m_negcap_500k.csv \
-      --output-dir data/negcap/$split \
+      --input-csv data/cc12m/cc12m_negcap_500k.csv.gz \
+      --image-root /path/to/cc12m_root --output-dir data/negcap/$split \
       --model ViT-B-32 --split $split --split-ratio 0.9 --seed 42
 done
 
@@ -138,7 +150,7 @@ done
 for split in train val; do
   uv run scripts/extract_features.py \
       --input-csv data/mcq_split/$split.csv \
-      --image-root / --output-dir data/mcq/$split \
+      --image-root /path/to/cc12m_root --output-dir data/mcq/$split \
       --model ViT-B-32 --layers 7 12 --save-token-ids
 done
 ```
@@ -159,7 +171,7 @@ uv run scripts/train_joint.py --exp-name peakpatch \
 
 Evaluate `results/joint/peakpatch/checkpoints/best_ec.pt` and `best_sc.pt` with
 `scripts/eval_mcq.py --ec-checkpoint ... --sc-checkpoint ...`. On this data the best validation
-SCN accuracy is around 0.87, well below what the COCO ablation below reaches. That is expected,
+SCN accuracy is around 0.82&ndash;0.87, well below what the COCO ablation below reaches. That is expected,
 because these questions are harder.
 
 `scripts/train_ec.py` and `scripts/train_sc.py` train either module on its own, for ablations.
