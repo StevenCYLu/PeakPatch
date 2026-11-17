@@ -84,8 +84,6 @@ def main():
     parser = argparse.ArgumentParser(description="Extract negcap features for CLIP model")
     parser.add_argument("--input-csv", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
-    parser.add_argument("--image-root", type=str, default="/",
-                        help="Root that relative image_path entries resolve against")
     parser.add_argument("--model", type=str, default="ViT-L-14")
     parser.add_argument("--pretrained", type=str, default="openai")
     parser.add_argument("--batch-size", type=int, default=128)
@@ -151,7 +149,7 @@ def main():
 
     def _load_image(row):
         try:
-            img = Image.open(Path(args.image_root) / row["image_path"]).convert("RGB")
+            img = Image.open(row["image_path"]).convert("RGB")
             return preprocess(img)
         except Exception:
             return None
