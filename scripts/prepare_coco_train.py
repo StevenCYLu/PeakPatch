@@ -1,4 +1,11 @@
-"""Prepare COCO train2014 negation data for joint EC+SC training."""
+"""Build COCO train2014 negation data (ablation only, not the released recipe).
+
+Every MCQ built here has the un-negated caption as its correct answer, so an SCN
+trained on it learns to reject any option that contains a negation. That scores
+~96% on its own validation split but below chance on NegBench, where most correct
+answers are negated. The released checkpoints were trained on CC12M-NegCap and
+CC12M-NegMCQ instead; see the Training section of the README.
+"""
 
 import argparse
 import json

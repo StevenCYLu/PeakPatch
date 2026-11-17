@@ -38,6 +38,7 @@ Shipped in `checkpoints/`, no download needed:
 |---|---|--:|---|
 | `peakpatch_ecn.pt` | ECN | 4,728,833 | peak layer 8, anchor layer 6 |
 | `peakpatch_scn.pt` | SCN | 493,825 | layers [7, 12], bound 0.2 |
+| `init/ecn_pretrain.pt` | ECN | 4,728,833 | ECN-only pretraining, used to warm-start training |
 
 ## Data setup
 
@@ -100,40 +101,54 @@ Any fine-tuned ViT-B/32 checkpoint (NegCLIP, CoN-CLIP, ...) can be scored the sa
 
 ## Training
 
-**1. Build the training data** from COCO train2014 &mdash; object-absence negated captions for the
-ECN, and 4-way MCQ questions for the SCN. Both CSVs record absolute image paths:
+The released checkpoints were trained on CC12M-derived negation data built with the
+[NegBench](https://github.com/m1k2zoo/negbench) pipeline (`synthetic_datasets/finetuning/`):
+
+| CSV | Used for | Rows | Correct-answer templates |
+|---|---|--:|---|
+| `cc12m_negcap_500k.csv` | ECN (negated captions) | 1,176,307 | &mdash; |
+| `cc12m_negmcq_500k.csv` | SCN (4-way MCQ) | 391,823 | 130,766 hybrid, 130,590 negative, 110,706 positive, 19,761 modified positive |
+
+The MCQ set matters most. Its correct answers are often negated, as in NegBench. An SCN trained
+only on questions whose correct answer is un-negated learns to reject every option that contains a
+negation. It then scores below chance on NegBench (see the note at the end of this section).
+
+**1. Split the MCQ CSV** 80/20 with seed 42:
 
 ```bash
-uv run scripts/prepare_coco_train.py \
-    --coco-dir /path/to/coco --output-dir data/coco_train_negation
-# -> coco_negcap_train2014.csv, coco_negmcq_train2014.csv
+uv run scripts/split_mcq_csv.py \
+    --input-csv /path/to/cc12m_negmcq_500k.csv --output-dir data/mcq_split
+# -> train.csv (313,458 rows), val.csv (78,365 rows)
 ```
 
 **2. Pre-extract frozen CLIP features.** Nothing in the backbone is trained, so its features are
 computed once and reused. Pass `--model ViT-B-32` explicitly &mdash; the extractors default to
-ViT-L/14:
+ViT-L/14. Both CSVs store absolute image paths, hence `--image-root /`:
 
 ```bash
 # negcap features for the ECN, split 90/10
 for split in train val; do
   uv run scripts/extract_negcap_features.py \
-      --input-csv data/coco_train_negation/coco_negcap_train2014.csv \
+      --input-csv /path/to/cc12m_negcap_500k.csv \
       --output-dir data/negcap/$split \
       --model ViT-B-32 --split $split --split-ratio 0.9 --seed 42
 done
 
-# per-layer [EOS] features for the SCN
-uv run scripts/extract_features.py \
-    --input-csv data/coco_train_negation/coco_negmcq_train2014.csv \
-    --image-root / --output-dir data/mcq/train \
-    --model ViT-B-32 --layers 3 7 8 12
+# per-layer [EOS] features and token IDs for the SCN
+for split in train val; do
+  uv run scripts/extract_features.py \
+      --input-csv data/mcq_split/$split.csv \
+      --image-root / --output-dir data/mcq/$split \
+      --model ViT-B-32 --layers 7 12 --save-token-ids
+done
 ```
 
-**3. Train.** The ECN and SCN are trained together from randomly initialised weights, in one run of
-about an hour on a single A100:
+**3. Train jointly.** The ECN is warm-started from the ECN-only checkpoint in `checkpoints/init/`.
+The SCN starts from random weights:
 
 ```bash
 uv run scripts/train_joint.py --exp-name peakpatch \
+    --ec-init checkpoints/init/ecn_pretrain.pt \
     --negcap-train-dir data/negcap/train --negcap-val-dir data/negcap/val \
     --mcq-train-dir data/mcq/train --mcq-val-dir data/mcq/val \
     --target-layer 8 --anchor-layer 6 --sc-layers 7 12 \
@@ -142,7 +157,17 @@ uv run scripts/train_joint.py --exp-name peakpatch \
     --output-dir results/joint
 ```
 
+Evaluate `results/joint/peakpatch/checkpoints/best_ec.pt` and `best_sc.pt` with
+`scripts/eval_mcq.py --ec-checkpoint ... --sc-checkpoint ...`. On this data the best validation
+SCN accuracy is around 0.87, well below what the COCO ablation below reaches. That is expected,
+because these questions are harder.
+
 `scripts/train_ec.py` and `scripts/train_sc.py` train either module on its own, for ablations.
+
+> **COCO ablation.** `scripts/prepare_coco_train.py` builds negation data from COCO train2014. Every
+> MCQ it writes has the un-negated caption as the correct answer. A model trained on it reaches
+> ~96% validation accuracy but only ~23% on NegBench COCO MCQ, so do not use it to reproduce the
+> results above.
 
 ## Citation
 

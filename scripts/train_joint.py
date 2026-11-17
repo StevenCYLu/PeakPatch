@@ -250,6 +250,9 @@ def main():
     parser.add_argument("--mcq-train-dir", type=str, required=True)
     parser.add_argument("--mcq-val-dir", type=str, required=True)
     parser.add_argument("--max-negcap-samples", type=int, default=None)
+    parser.add_argument("--ec-init", type=str, default=None,
+                        help="Warm-start the ECN from an ECN-only checkpoint "
+                             "(the released model used checkpoints/init/ecn_pretrain.pt)")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--ec-batch-size", type=int, default=256)
     parser.add_argument("--sc-batch-size", type=int, default=256)
@@ -315,6 +318,10 @@ def main():
         cls_only=args.ec_cls_only,
         no_pool=args.ec_no_pool,
     ).to(device)
+    if args.ec_init:
+        print(f"  Warm-starting ECN from {args.ec_init}")
+        ec_ckpt = torch.load(args.ec_init, map_location=device, weights_only=False)
+        ec_model.load_state_dict(ec_ckpt["model_state_dict"])
     ec_model.train()
     for p in ec_model.parameters():
         p.requires_grad = True
@@ -389,6 +396,7 @@ def main():
         "anchor_layer": args.anchor_layer,
         "sc_layers": args.sc_layers,
         "sc_max_correction": args.sc_max_correction,
+        "ec_init": args.ec_init,
         "epochs": args.epochs,
         "ec_batch_size": args.ec_batch_size,
         "sc_batch_size": args.sc_batch_size,
